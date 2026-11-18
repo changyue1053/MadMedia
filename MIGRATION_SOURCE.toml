@@ -1,0 +1,10 @@
+sdk = "MadMedia"
+stage = "M01-independent-native-baseline"
+source_repository = "changyue1053/IMMedia"
+source_commit = "4751411da52e84a46d34d759de0f9f873a332ed8"
+source_directory = "immedia"
+source_files = 67
+source_first_party_license = "No top-level license supplied; owner-authorized publication, no third-party reuse grant invented"
+excluded = ["root HTML architecture documents", "source git history"]
+retained = ["native implementation", "unit/e2e/fuzz test sources", "stb license blocks", "protocol and journal identities"]
+changes = ["Mad CMake package and source facade", "optional bounded-schema observation adapter", "GCC include fixes", "licensing notices", "sanitizer coverage restored for stb"]

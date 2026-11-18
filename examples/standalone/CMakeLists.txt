@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.16)
+project(MadMediaConsumer LANGUAGES CXX)
+find_package(MadMedia CONFIG REQUIRED)
+add_executable(madmedia_consumer main.cpp)
+target_link_libraries(madmedia_consumer PRIVATE MadMedia::core)

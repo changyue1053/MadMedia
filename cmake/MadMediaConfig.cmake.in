@@ -1,0 +1,21 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+find_dependency(CURL)
+find_dependency(SQLite3)
+include("${CMAKE_CURRENT_LIST_DIR}/MadMediaTargets.cmake")
+if("Obs" IN_LIST MadMedia_FIND_COMPONENTS)
+ find_path(MadMedia_MADOBS_INCLUDE_DIR madobs/observer.h)
+ if(MadMedia_MADOBS_INCLUDE_DIR)
+  if(NOT TARGET MadMedia::obs)
+   add_library(MadMedia::obs INTERFACE IMPORTED)
+   set_target_properties(MadMedia::obs PROPERTIES
+    INTERFACE_LINK_LIBRARIES MadMedia::core
+    INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@;${MadMedia_MADOBS_INCLUDE_DIR}")
+  endif()
+  set(MadMedia_Obs_FOUND TRUE)
+ else()
+  set(MadMedia_Obs_FOUND FALSE)
+ endif()
+endif()
+check_required_components(MadMedia)
