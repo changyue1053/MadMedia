@@ -48,8 +48,8 @@ ctest --test-dir build-obs --output-on-failure -R sdk
 
 ## Scope and status
 
-- C++ façade is a source-level 0.x API, **not stable C ABI**. `immd` internals are retained to preserve existing behavior and data compatibility.
-- iOS/Android/OHOS packages, C ABI, upload-provider injection, background transfer bridges, production credentials and weak-network/device qualification remain future work.
+- C++ façade is a source-level 0.x API. A Linux-validated development C ABI v1 now ships as `MadMedia::ffi`; see `docs/C_ABI.md`. It is **not a stable 1.0 ABI or mobile support claim**. `immd` internals are retained to preserve existing behavior and data compatibility.
+- iOS/Android/OHOS packages, target-specific C ABI entropy/lifecycle validation, upload-provider injection, background transfer bridges, production credentials and weak-network/device qualification remain future work.
 - No IMSDK or message-delivery orchestration is included.
 - Source provenance and publication constraints: `MIGRATION_SOURCE.toml`, `THIRD_PARTY_NOTICES.md`, `SECURITY.md`, `SUPPORT_MATRIX.md`, `TASK_RESULT.md`.
 - Upstream README is historical, not current verification evidence: `docs/upstream/IMMedia-README.md`.

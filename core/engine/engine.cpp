@@ -1334,6 +1334,14 @@ struct Engine::Impl {
     rec.updated_at = rec.created_at;
     if (Error e = journal->save(rec)) {
       IMMD_ELOG("enqueue journal save failed: %s", e.msg.c_str());
+      // The request was already accepted by the command queue. Surface an
+      // explicit terminal failure instead of leaving the caller waiting forever.
+      TaskCtx failed;
+      failed.rec = std::move(rec);
+      failed.rec.state = TaskState::Failed;
+      failed.rec.last_error = "journal enqueue failed";
+      failed.last_code = e.code;
+      notify(failed);
       return;
     }
     TaskCtx ctx;
