@@ -25,3 +25,5 @@ Native `Config::journal_durability` optionally selects verified SQLite WAL/FULL;
 C consumers may opt into `madmedia_create_v2` for NORMAL/FULL configuration and a sticky initial receipt field in poll JSON. The original v1 ABI/version query/schema remain frozen. See [C ABI](docs/C_ABI.md); a consumed terminal or explicit destroy removes the receipt from this in-memory facade.
 
 Read-only reconciliation is available as native `query_persisted` and C `madmedia_query_persisted`, bypassing live task memory and without recovery/slot admission. A journal row is not proof of physical durability or original sync mode; NOT_FOUND is not proof of never submitted. C output excludes paths/error text. See [C ABI](docs/C_ABI.md).
+
+Later journal write errors now stop the affected task with in-memory Io Failed rather than advancing to an unrecorded target state. They do not recursively persist Failed or automatically retry. Cleanup is ordered after successful Ready/Cancel checkpoints; prior network/file side effects are not rolled back. See [checkpoint failures](docs/CHECKPOINT_FAILURES.md).

@@ -274,7 +274,7 @@ struct Engine::Impl {
     }
     c.rec.state = to;
     c.rec.updated_at = now();
-    if (Error e = journal->save(c.rec)) IMMD_ELOG("journal save failed: %s", e.msg.c_str());
+    if (!checkpoint(c)) return false;
     notify(c, why);
     return true;
   }
@@ -294,6 +294,19 @@ struct Engine::Impl {
     }
   }
 
+  bool checkpoint(TaskCtx& c) {
+    if (!journal->save(c.rec)) return true;
+    // A failed write must not authorize later transfer/cleanup or a false Ready.
+    // Do NOT recursively try to persist Failed on an unavailable journal.
+    cancel_runtime(c);
+    c.rec.state = TaskState::Failed;
+    c.last_code = Err::Io;
+    c.rec.last_error = "Io: journal checkpoint failed";
+    IMMD_ELOG("journal checkpoint failed; task stopped");
+    notify(c);
+    return false;
+  }
+
   void task_fail(TaskCtx& c, Err e, const std::string& msg) {
     cancel_runtime(c);
     c.last_code = e;
@@ -307,11 +320,12 @@ struct Engine::Impl {
     // Failed 保留断点与 staging：手动/条件恢复从账本原地续传
   }
 
-  void finish_ready(TaskCtx& c) {
+  void finish_ready(TaskCtx& c, bool store_cache = false) {
     cancel_runtime(c);
-    if (c.rec.kind == TaskKind::Upload && !c.rec.staging_path.empty()) remove_file(c.rec.staging_path);
     c.rec.bytes_done = c.rec.size;
-    to_state(c, TaskState::Ready);
+    if (!to_state(c, TaskState::Ready)) return;
+    if (c.rec.kind == TaskKind::Upload && !c.rec.staging_path.empty()) remove_file(c.rec.staging_path);
+    if (store_cache) dispatch_cache_store(c.rec.sha256_hex, c.rec.dest_path);
     tasks.erase(c.rec.task_id);  // 终态出运行时；journal 保留行
   }
 
@@ -1011,7 +1025,7 @@ struct Engine::Impl {
     c.rec.bitmap = PartBitmap::from_blob(c.rec.bitmap.blob(), c.rec.nparts);
     c.part_crcs.push_back(ev.crc);  // flush 严格顺序 → 索引即分片号
     c.rec.size += ev.len;
-    journal->save(c.rec);
+    if (!checkpoint(c)) return;
     maybe_stream_flush(c);     // 缓冲里可能还有整片
     maybe_stream_finalize(c);  // finish 已到且这是尾片时推进
     // 新分片的 PUT 由 loop 的 pump 派发
@@ -1071,7 +1085,7 @@ struct Engine::Impl {
     if (c.rec.state != TaskState::Transferring) return;
     if (ev.err) return task_fail(c, ev.err.code, ev.err.msg);
     c.rec.sha256_hex = ev.sha;
-    journal->save(c.rec);
+    if (!checkpoint(c)) return;
     maybe_stream_finalize(c);
   }
 
@@ -1093,7 +1107,7 @@ struct Engine::Impl {
     }
     c.part_crcs = std::move(ev.crcs);
     c.planned_part = ev.planned_part;
-    journal->save(c.rec);
+    if (!checkpoint(c)) return;
     send_init(c);
   }
 
@@ -1124,8 +1138,7 @@ struct Engine::Impl {
     if (Error e = rename_file(c.rec.staging_path, c.rec.dest_path))
       return task_fail(c, Err::Io, "rename to dest failed");
     c.rec.staging_path.clear();
-    dispatch_cache_store(c.rec.sha256_hex, c.rec.dest_path);  // 回填：下次同内容零网络
-    finish_ready(c);
+    finish_ready(c, true); // cache fill only after the Ready checkpoint succeeds
   }
 
   void on_http(EvHttp& ev) {
@@ -1201,7 +1214,7 @@ struct Engine::Impl {
         if (c.rec.state == TaskState::Preparing) {
           if (!to_state(c, TaskState::Transferring)) return;
         } else {
-          journal->save(c.rec);
+          if (!checkpoint(c)) return;
           notify(c, "reconciled");
         }
         if (c.rec.streaming) {   // 流式：CRC 口径 = 服务端分片大小；开闸缓冲的 flush
@@ -1257,7 +1270,7 @@ struct Engine::Impl {
       c.attempts.erase(p);
       c.retry_at.erase(p);
       ewma.on_sample(len, std::max<int64_t>(r.elapsed_ms, 1));
-      journal->save(c.rec);
+      if (!checkpoint(c)) return;
       maybe_notify_progress(c);
       if (c.rec.streaming) {
         maybe_stream_finalize(c);  // 流式：nparts 还在生长，是否收敛由 finalize 统一判定
@@ -1354,7 +1367,7 @@ struct Engine::Impl {
       c.rec.staging_path = c.rec.dest_path + ".part";
       if (!to_state(c, TaskState::Transferring)) return;
     } else {
-      journal->save(c.rec);  // 刷新凭证（403 换新路径）
+      if (!checkpoint(c)) return;  // 刷新凭证（403 换新路径）
     }
   }
 
@@ -1369,7 +1382,7 @@ struct Engine::Impl {
       c.attempts.erase(p);
       c.retry_at.erase(p);
       ewma.on_sample(len, std::max<int64_t>(r.elapsed_ms, 1));
-      journal->save(c.rec);
+      if (!checkpoint(c)) return;
       maybe_notify_progress(c);
       if (c.rec.bitmap.complete()) {
         if (to_state(c, TaskState::Finalizing)) {
@@ -1452,9 +1465,8 @@ struct Engine::Impl {
     TaskCtx& c = it->second;
     if (!fsm_can(c.rec.state, TaskState::Canceled)) return;
     cancel_runtime(c);
-    if (c.rec.kind == TaskKind::Upload && !c.rec.staging_path.empty()) remove_file(c.rec.staging_path);
-    if (c.rec.kind == TaskKind::Download && !c.rec.staging_path.empty()) remove_file(c.rec.staging_path);
-    to_state(c, TaskState::Canceled);
+    if (!to_state(c, TaskState::Canceled)) return;
+    if (!c.rec.staging_path.empty()) remove_file(c.rec.staging_path);
     tasks.erase(id);  // journal 保留 Canceled 行供审计
   }
 
@@ -1477,7 +1489,7 @@ struct Engine::Impl {
         t.rec.state = TaskState::Failed;
         t.last_code = Err::Canceled;
         t.rec.last_error = "stream interrupted by restart";
-        journal->save(t.rec);
+        if (!checkpoint(t)) continue;
         notify(t, "recovered");
         continue;
       }
@@ -1490,15 +1502,17 @@ struct Engine::Impl {
           // 现场重建：指纹未完成 → 回 Queued 重来；已有指纹 → 直接 init 对账
           if (t.rec.kind == TaskKind::Upload && t.rec.sha256_hex.empty()) {
             t.rec.state = TaskState::Queued;  // 恢复期重建，不走 fsm（现场即事实）
-            journal->save(t.rec);
+            if (!checkpoint(t)) continue;
           } else {
             drive_control(t);
           }
           break;
         case TaskState::Transferring:
           if (t.rec.kind == TaskKind::Upload) {
-            t.rec.upload_id.empty() ? (void)(t.rec.state = TaskState::Queued, journal->save(t.rec))
-                                    : send_init(t);  // init 幂等对账：服务端 received_parts 为准
+            if (t.rec.upload_id.empty()) {
+              t.rec.state = TaskState::Queued;
+              if (!checkpoint(t)) continue;
+            } else send_init(t);  // init 幂等对账：服务端 received_parts 为准
           } else {
             send_dl_url(t);  // 凭证过期，换新后按位图续传
           }

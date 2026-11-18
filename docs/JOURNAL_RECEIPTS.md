@@ -18,8 +18,9 @@ The first native event for a newly admitted task has `journal_receipt`:
 Receipts describe the initial task intent only. They do not snapshot or fsync
 source/staging bytes, prove uploaded data exists, or promise that later state
 transitions persisted. Keep the original source accessible until preparation.
-Existing later-state journal failures are still logged; no global durability
-promise is added by this option. Streaming remains non-resumable across restart.
+Later-state journal failures stop the task with an in-memory Io Failed event;
+that Failed state itself is not promised persisted. See CHECKPOINT_FAILURES.md.
+No global durability promise is added by this option. Streaming remains non-resumable across restart.
 
 ## Delivery and races
 
