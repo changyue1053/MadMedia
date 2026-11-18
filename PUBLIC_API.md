@@ -31,3 +31,8 @@ Later journal write errors now stop the affected task with in-memory Io Failed r
 Native resume now defers until prior task I/O completes, reporting `ProgressEvent::resume_waiting`, and stale results are generation-filtered. See [attempt isolation](docs/ATTEMPT_ISOLATION.md). Rebuild native consumers; this does not add a C resume API or serialize unrelated tasks sharing destination paths.
 
 Cancel now waits nonblockingly for prior I/O, with native `cancel_waiting`, then commits Canceled, cleans staging and emits one terminal. Cleanup failure is explicit Io on Canceled; waiting intent is not crash-persisted. Close joins I/O before finalizing pending cancels. See [attempt isolation](docs/ATTEMPT_ISOLATION.md).
+
+Downloads reserve output, `.part` and `.cachetmp` paths through Engine shutdown
+(maximum 4096 accepted downloads per lifetime). Conflicting/unsafe paths reject
+admission; legacy relative output rows reject startup rather than guessing cwd.
+See [destination ownership](docs/DESTINATION_OWNERSHIP.md) before upgrading.

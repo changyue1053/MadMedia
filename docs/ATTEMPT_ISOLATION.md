@@ -81,7 +81,9 @@ fill is post-Ready background work, not a task result producer or resume writer.
 This isolates successive attempts of the **same task**. It does not serialize
 unrelated tasks that a host directs to the same destination path, undo remote
 side effects, force a stuck I/O operation to finish, or add whole-file durability.
-Applications must avoid conflicting destinations across tasks. Cancel cleanup
+M11 adds bounded same-Engine download destination admission; see
+DESTINATION_OWNERSHIP.md. Hosts must still avoid conflicts with other Engines,
+external writers and unrelated input files. Cancel cleanup
 is not a general filesystem transaction; the staging/rename caveats in
 CHECKPOINT_FAILURES.md still apply. No mobile qualification is implied.
 

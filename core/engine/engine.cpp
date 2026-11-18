@@ -1,4 +1,5 @@
 #include "core/engine/engine.h"
+#include "core/engine/destination_registry.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -236,6 +237,7 @@ struct Engine::Impl {
   std::thread sched;
   std::atomic<bool> stopping{false};  // 硬停：排空期间不再派发任何新工作
   std::map<std::string, TaskCtx> tasks;
+  DestinationRegistry destinations;
   std::mutex ids_mutex;
   std::set<std::string> reserved_ids; // includes persisted and newly admitted IDs
   Expected<std::string> reserve_id(const std::string& requested,const char* prefix) {
@@ -254,6 +256,11 @@ struct Engine::Impl {
   struct IdAdmission {
     Impl* owner;const std::string& id;bool committed=false;
     ~IdAdmission(){if(!committed)owner->unreserve_id(id);}
+  };
+
+  struct DestinationAdmission {
+    Impl* owner; const std::string& id; bool committed=false;
+    ~DestinationAdmission(){if(!committed)owner->destinations.rollback(id);}
   };
 
   ThroughputEwma ewma;
@@ -1624,6 +1631,12 @@ struct Engine::Impl {
       if (tasks.count(rec.task_id)) continue;
       TaskCtx c;
       c.rec = rec;
+      if(c.rec.kind==TaskKind::Download){
+        auto path=destinations.find(rec.task_id);
+        if(!path.ok()){IMMD_ELOG("download recovery reservation missing");continue;}
+        c.rec.dest_path=path.value();
+        if(!c.rec.staging_path.empty())c.rec.staging_path=path.value()+".part";
+      }
       c.started_ms = now();
       auto& ctx = tasks[rec.task_id];
       ctx = std::move(c);
@@ -1775,6 +1788,14 @@ Expected<std::unique_ptr<Engine>> Engine::start(Config cfg, ProgressCallback cb)
     if (mc.ok()) im.cache = std::move(mc.value());
     else IMMD_WLOG("cache disabled: %s", mc.error().msg.c_str());  // 缓存是优化不是依赖
   }
+  if(auto error=im.destinations.initialize(cfg.data_dir))return error;
+  auto unfinished=im.journal->load_unfinished();
+  if(!unfinished.ok())return make_err(Err::Io,"download destination inventory unavailable");
+  for(const auto& row:unfinished.value())if(row.kind==TaskKind::Download){
+    if(!std::filesystem::path(row.dest_path).is_absolute())return make_err(Err::State,"legacy relative download requires migration");
+    auto path=im.destinations.reserve(row.task_id,row.dest_path);if(!path.ok())return path.error();
+    if(!row.staging_path.empty()&&row.staging_path!=row.dest_path+".part")return make_err(Err::State,"download staging path rejected");
+  }
   im.rate_last_ms = im.now();
   im.rate_tokens = cfg.rate_limit_bps;
   im.sched = std::thread([p = eng->impl_.get()] { p->loop(); });
@@ -1824,11 +1845,14 @@ Expected<std::string> Engine::download(DownloadRequest r) {
   rec.state = TaskState::Queued;
   rec.priority = r.priority;
   rec.media_id = r.media_id;
-  rec.dest_path = r.dest_path;
+  auto destination=impl_->destinations.reserve(id,r.dest_path);if(!destination.ok())return destination.error();
+  Impl::DestinationAdmission path_admission{impl_.get(),id};
+  rec.dest_path = std::move(destination.value());
   rec.sha256_hex = r.sha256_hex;
   Expected<std::string> result(id);
   if (!impl_->q.try_push(CmdDownload{std::move(rec)})) return make_err(Err::Busy,"engine queue full");
   admission.committed=true;
+  path_admission.committed=true;
   return result;
 }
 

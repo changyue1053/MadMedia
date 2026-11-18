@@ -116,3 +116,15 @@ produces Failed instead and retains recovery files. If I/O never returns,
 cancel remains waiting and destroy may wait while joining it. Intent before
 the terminal checkpoint is not crash-persisted. Destroy still abandons
 unconsumed snapshots, so poll the terminal first when its outcome matters.
+
+## Download path ownership
+
+M11 applies the native three-path ownership rule to C downloads too. A handle
+retains accepted destination/`.part`/`.cachetmp` ownership until destroy, even
+when its terminal event slot has been polled and reused. A lifetime maximum of
+4096 downloads is separate from pending-event capacity. Native conflict, invalid
+path or owner-limit rejection maps to `MADMEDIA_NATIVE_ERROR` under the existing
+submission mapping; a full event-slot queue still returns `MADMEDIA_BUSY`.
+Rejected submission does not consume a slot or return an ID. No v1/v2 structure,
+version or poll JSON schema changes. See DESTINATION_OWNERSHIP.md for path and
+legacy-startup compatibility constraints.
