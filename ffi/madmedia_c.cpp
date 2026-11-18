@@ -27,6 +27,7 @@ struct State {
  std::vector<Slot> slots;
  std::atomic<bool> fault{false};
  bool closed=false;
+ bool receipt_json=false;
  size_t cursor=0;
  uint64_t id=0;
 };
@@ -49,6 +50,11 @@ void receive(std::weak_ptr<State> weak,const immd::ProgressEvent& event) noexcep
    if(event.task_id.size()>=MADMEDIA_TASK_ID_CAPACITY || event.media_id.size()>4096) {
     state->fault.store(true);return;
    }
+   if(event.journal_receipt!=immd::JournalReceipt::None) {
+    if(slot.event.journal_receipt!=immd::JournalReceipt::None &&
+       slot.event.journal_receipt!=event.journal_receipt){state->fault.store(true);return;}
+    slot.event.journal_receipt=event.journal_receipt;
+   }
    slot.event.task_id=event.task_id;slot.event.media_id=event.media_id;
    slot.event.kind=event.kind;slot.event.state=event.state;slot.event.error=event.error;
    slot.event.bytes_done=event.bytes_done;slot.event.bytes_total=event.bytes_total;
@@ -59,8 +65,9 @@ void receive(std::weak_ptr<State> weak,const immd::ProgressEvent& event) noexcep
 template<class F> madmedia_status guarded(F&& f) noexcept {
  try{return f();}catch(...){return MADMEDIA_INTERNAL;}
 }
-std::string json(const immd::ProgressEvent& e) {
+std::string json(const immd::ProgressEvent& e,bool receipt_json) {
  auto j=immd::Json::object();
+ if(receipt_json)j.set("journal_receipt",immd::Json::number(static_cast<int>(e.journal_receipt)));
  j.set("task_id",immd::Json::str(e.task_id));
  j.set("media_id",immd::Json::str(e.media_id));
  j.set("kind",immd::Json::number(static_cast<int>(e.kind)));
@@ -91,6 +98,7 @@ template<class Submit> madmedia_status submit(madmedia_handle h,char* out,size_t
  auto it=std::find_if(state->slots.begin(),state->slots.end(),[](const Slot& s){return !s.used;});
  if(it==state->slots.end())return MADMEDIA_BUSY;
  const auto id=secure_task_id(); // no PRNG seed, counter or restart-dependent fallback
+ it->event.journal_receipt=immd::JournalReceipt::None;
  it->id=id; it->used=true; it->pending=false; it->terminal=false;
  try {
   auto result=fn(*state->engine,id);
@@ -99,6 +107,21 @@ template<class Submit> madmedia_status submit(madmedia_handle h,char* out,size_t
  std::memcpy(out,id.c_str(),id.size()+1);
  return MADMEDIA_OK;
 }
+madmedia_status create_engine(const char* base_url,const char* data_dir,uint32_t pending,
+ immd::JournalDurability durability,bool receipt_json,madmedia_handle* out) {
+ auto state=std::make_shared<State>();state->receipt_json=receipt_json;state->slots.resize(pending);
+ for(auto& slot:state->slots){slot.id.reserve(MADMEDIA_TASK_ID_CAPACITY);slot.event.task_id.reserve(MADMEDIA_TASK_ID_CAPACITY);slot.event.media_id.reserve(4096);}
+ {std::lock_guard<std::mutex> lock(registry_mutex);
+  if(next_handle==std::numeric_limits<uint64_t>::max())return MADMEDIA_INTERNAL;
+  state->id=next_handle++;
+ }
+ immd::Config cfg;cfg.base_url=base_url;cfg.data_dir=data_dir;cfg.journal_durability=durability;
+ auto engine=immd::Engine::start(std::move(cfg),[weak=std::weak_ptr<State>(state)](const auto& e){receive(weak,e);});
+ if(!engine.ok())return MADMEDIA_NATIVE_ERROR;
+ state->engine=std::move(engine.value());
+ {std::lock_guard<std::mutex> lock(registry_mutex);registry.emplace(state->id,state);}
+ *out=state->id;return MADMEDIA_OK;
+}
 }
 extern "C" {
 uint32_t madmedia_abi_version(void){return MADMEDIA_ABI_VERSION;}
@@ -106,18 +129,15 @@ madmedia_status madmedia_create(const madmedia_config_v1* c,madmedia_handle* out
  if(out)*out=0;
  if(!c||!out||c->struct_size<sizeof(*c)||c->abi_version!=1||c->reserved||
  !c->base_url||!c->data_dir||!*c->base_url||!*c->data_dir||c->max_pending_tasks<1||c->max_pending_tasks>256)return MADMEDIA_INVALID;
- auto state=std::make_shared<State>();state->slots.resize(c->max_pending_tasks);
- for(auto& slot:state->slots){slot.id.reserve(MADMEDIA_TASK_ID_CAPACITY);slot.event.task_id.reserve(MADMEDIA_TASK_ID_CAPACITY);slot.event.media_id.reserve(4096);}
- {std::lock_guard<std::mutex> lock(registry_mutex);
-  if(next_handle==std::numeric_limits<uint64_t>::max())return MADMEDIA_INTERNAL;
-  state->id=next_handle++;
- }
- immd::Config cfg;cfg.base_url=c->base_url;cfg.data_dir=c->data_dir;
- auto engine=immd::Engine::start(std::move(cfg),[weak=std::weak_ptr<State>(state)](const auto& e){receive(weak,e);});
- if(!engine.ok())return MADMEDIA_NATIVE_ERROR;
- state->engine=std::move(engine.value());
- {std::lock_guard<std::mutex> lock(registry_mutex);registry.emplace(state->id,state);}
- *out=state->id;return MADMEDIA_OK;
+ return create_engine(c->base_url,c->data_dir,c->max_pending_tasks,immd::JournalDurability::Normal,false,out);
+});}
+madmedia_status madmedia_create_v2(const madmedia_config_v2* c,madmedia_handle* out){return guarded([&]{
+ if(out)*out=0;
+ if(!c||!out||c->struct_size<sizeof(*c)||c->abi_version!=2||c->reserved||c->reserved2||
+ c->journal_mode>MADMEDIA_JOURNAL_FULL||!c->base_url||!c->data_dir||!*c->base_url||!*c->data_dir||
+ c->max_pending_tasks<1||c->max_pending_tasks>256)return MADMEDIA_INVALID;
+ return create_engine(c->base_url,c->data_dir,c->max_pending_tasks,
+  c->journal_mode==MADMEDIA_JOURNAL_FULL?immd::JournalDurability::Full:immd::JournalDurability::Normal,true,out);
 });}
 madmedia_status madmedia_upload(madmedia_handle h,const char* path,const char* mime,char* out,size_t cap){return guarded([&]{
  if(!path||!*path||!mime)return MADMEDIA_INVALID;
@@ -145,7 +165,7 @@ madmedia_status madmedia_poll(madmedia_handle h,char* buffer,size_t capacity,siz
  std::lock_guard<std::mutex> lock(s->events);
  for(size_t n=0;n<s->slots.size();++n){size_t i=(s->cursor+n)%s->slots.size();auto& slot=s->slots[i];
   if(!slot.used||!slot.pending)continue;
-  auto data=json(slot.event);*required=data.size()+1;
+  auto data=json(slot.event,s->receipt_json);*required=data.size()+1;
   if(!buffer||capacity<*required)return MADMEDIA_BUFFER_TOO_SMALL;
   std::memcpy(buffer,data.c_str(),*required);slot.pending=false;
   if(slot.terminal)slot.used=false;

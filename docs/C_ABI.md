@@ -32,3 +32,39 @@ The slot bound is not a process-wide RAM cap; native transfer/compute buffers ha
 - All checks use always-active CHECK under NDEBUG.
 
 Task IDs are collision-resistant operation identifiers, not authentication tokens or a claim that the SDK is cryptographically audited. Source reads handle EINTR, short reads and EOF/failure; there is no insecure fallback.
+
+## Additive v2 configuration and receipt snapshots
+
+`madmedia_create_v2(madmedia_config_v2*, out)` accepts `abi_version=2`,
+`struct_size >= sizeof(madmedia_config_v2)`, both reserved fields zero, and
+`journal_mode` NORMAL=0 or FULL=1. All old validation/admission constraints apply.
+Invalid inputs clear a valid output pointer before returning INVALID. No new
+host callback, recovery, streaming, credential or platform feature is implied.
+
+The existing ABI v1 struct, `MADMEDIA_ABI_VERSION`, `madmedia_abi_version()` result
+(1), create entrypoint and JSON schema remain frozen. Applications explicitly
+link the new create_v2 symbol to opt in; do not pass a v2 struct to v1 create.
+All handle operations are shared and obey the same lifecycle locking rules.
+
+For handles created through v2, every poll JSON has numeric `journal_receipt`:
+0=None/unknown, 1=initial row committed under NORMAL, 2=initial row committed
+under FULL, 3=initial write failed. This field is retained monotonically across
+coalesced progress and in the first pinned terminal snapshot. A successful
+nonterminal poll does not clear the receipt. Size probes, undersized buffers and
+JSON allocation failures do not consume it. Terminal consumption frees the slot,
+so there is no later lookup or replay; reusing the slot starts at None. Conflicting
+non-None receipts produce sticky INTERNAL rather than a false acknowledgment.
+
+Receipt absence does not mean uncommitted. Shutdown abandons unconsumed snapshots
+by explicit contract, and process death may occur between commit and observation.
+Submission OK is still queue admission only. Receipts cover only the initial
+journal task row, not source/media bytes or later state changes. FULL remains
+subject to SQLite/VFS/storage behavior; see [native receipt contract](JOURNAL_RECEIPTS.md).
+
+Regression: old v1 schema unchanged; v2 malformed size/version/reserved/mode;
+short submit buffer before effects; one-slot backpressure; FULL/ NORMAL terminal
+coalescing; initial insert failure; slot reuse after Failed receipt; 10,000
+coalesced progress events; first terminal pin; size/short poll preservation; and
+concurrent empty polling with synchronous destroy. Pure-C header compilation is
+included, plus a pure-C successful FULL download/cancel/terminal receipt test.
+Validated target remains Linux only, no mobile qualification claim.

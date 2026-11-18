@@ -21,3 +21,5 @@ Native task-ID defaults now share the Linux OS entropy provider with C ABI; new 
 On validated Linux builds, Engine holds cooperative exclusive ownership of its data directory until workers, callbacks and storage close; a second Engine/C handle is rejected. See [directory ownership](docs/DIRECTORY_OWNERSHIP.md), especially crash-vs-durability and hostile-directory limitations.
 
 Native `Config::journal_durability` optionally selects verified SQLite WAL/FULL; the default remains NORMAL. `ProgressEvent::journal_receipt` acknowledges only the initial task-record commit asynchronously, not source-byte persistence or completion. See [journal receipts](docs/JOURNAL_RECEIPTS.md) for delivery, failure, recovery and power-loss limits. C ABI v1 is unchanged. Rebuild C++ consumers.
+
+C consumers may opt into `madmedia_create_v2` for NORMAL/FULL configuration and a sticky initial receipt field in poll JSON. The original v1 ABI/version query/schema remain frozen. See [C ABI](docs/C_ABI.md); a consumed terminal or explicit destroy removes the receipt from this in-memory facade.
