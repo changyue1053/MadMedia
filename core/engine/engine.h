@@ -37,9 +37,11 @@ struct ProgressEvent {
   int64_t bytes_done = 0;
   int64_t bytes_total = 0;
   std::string media_id;  // Ready（上传/秒传）时携带
-  Err error = Err::Ok;   // Failed 时携带
+  Err error = Err::Ok;   // Failed, or Canceled with staging cleanup failure
   std::string message;
   JournalReceipt journal_receipt = JournalReceipt::None;
+  bool resume_waiting = false; // waiting for canceled prior I/O to finish
+  bool cancel_waiting = false; // cancellation intent waiting for prior I/O
 };
 
 // 回调线程约定（三内核一致）：内核回调线程发出，业务自己切主线程；回调内禁止调用引擎 API 之外的内核对象。

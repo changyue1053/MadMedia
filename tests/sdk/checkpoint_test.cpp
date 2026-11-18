@@ -47,15 +47,15 @@ int main(){
    case 2:im.on_cancel("fixture");break;
    case 3:im.on_pause("fixture");break;
    case 4:im.on_resume("fixture");break;
-   case 5:{c.rec.streaming=true;EvStreamFlushed ev;ev.id="fixture";ev.part=1;ev.len=1;im.on_stream_flushed(ev);break;}
-   case 6:{EvStreamHashed ev;ev.id="fixture";ev.sha="digest";im.on_stream_hashed(ev);break;}
-   case 7:{EvPrepared ev;ev.id="fixture";ev.size=1;ev.sha="digest";im.on_prepared(ev);break;}
+   case 5:{c.rec.streaming=true;EvStreamFlushed ev;ev.id="fixture";ev.generation=c.generation;ev.part=1;ev.len=1;im.on_stream_flushed(ev);break;}
+   case 6:{EvStreamHashed ev;ev.id="fixture";ev.generation=c.generation;ev.sha="digest";im.on_stream_hashed(ev);break;}
+   case 7:{EvPrepared ev;ev.id="fixture";ev.generation=c.generation;ev.size=1;ev.sha="digest";im.on_prepared(ev);break;}
    case 8:{HttpResponse r;r.status=200;r.body=R"({"result":"upload","upload_id":"u","part_size":1,"nparts":1,"received_parts":[0]})";im.on_init(c,r);break;}
    case 9:{HttpResponse r;r.status=200;im.on_put_part(c,0,r);break;}
    case 10:{HttpResponse r;r.status=206;r.bytes_down=1;im.on_get_part(c,0,r);break;}
    case 11:case 12:case 13:im.tasks.clear();im.on_recover();break;
    case 14:{HttpResponse r;r.status=200;r.body=R"({"url":"http://127.0.0.1:1/part","size":1})";im.on_dl_url(c,r);break;}
-   case 15:{EvVerify ev;ev.id="fixture";im.on_verify(ev);break;}
+   case 15:{EvVerify ev;ev.id="fixture";ev.generation=c.generation;im.on_verify(ev);break;}
    case 16:im.finish_ready(c);break;
   }
   CHECK(port->calls==0);

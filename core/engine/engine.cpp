@@ -74,6 +74,7 @@ struct CmdQuery {
 };
 struct EvPrepared {
   std::string id;
+  uint64_t generation = 0;
   Error err;
   int64_t size = 0;
   std::string sha, quick;
@@ -83,15 +84,18 @@ struct EvPrepared {
 };
 struct EvProof {
   std::string id;
+  uint64_t generation = 0;
   Error err;
   std::string proof;
 };
 struct EvVerify {
   std::string id;
+  uint64_t generation = 0;
   Error err;
 };
 struct EvCacheHit {
   std::string id;
+  uint64_t generation = 0;
   Error err;        // NotFound = 未命中 → 走正常下载
   int64_t size = 0;
 };
@@ -104,6 +108,7 @@ struct CmdStreamFinish {
 };
 struct EvStreamFlushed {
   std::string id;
+  uint64_t generation = 0;
   Error err;
   uint32_t part = 0;
   int64_t len = 0;
@@ -111,11 +116,13 @@ struct EvStreamFlushed {
 };
 struct EvStreamHashed {
   std::string id;
+  uint64_t generation = 0;
   Error err;
   std::string sha;
 };
 struct EvHttp {
   std::string id;
+  uint64_t generation = 0;
   Op op = Op::Init;
   uint32_t part = 0;
   HttpResponse resp;
@@ -159,8 +166,22 @@ class CallbackThread {
 };
 
 // 任务运行时上下文（仅调度线程访问）
+struct WorkToken {
+  std::atomic<bool> done{false};
+  uint64_t http_id = 0, compute_id = 0; // scheduler-owned IDs
+};
+struct WorkDone {
+  std::shared_ptr<WorkToken> token;
+  ~WorkDone() { token->done.store(true, std::memory_order_release); }
+};
 struct TaskCtx {
   TaskRecord rec;
+  uint64_t generation = 1; // process-local; 0 permanently exhausts this context
+  bool resume_requested = false;
+  bool cancel_requested = false;
+  bool cancel_cleanup_failed = false;
+  bool stream_recovery_blocked = false;
+  std::vector<std::shared_ptr<WorkToken>> work;
   std::map<uint32_t, std::string> urls;
   std::set<uint32_t> inflight;
   std::map<uint32_t, uint64_t> http_ids;
@@ -249,6 +270,8 @@ struct Engine::Impl {
     if (!user_cb) return;
     ProgressEvent ev;
     ev.journal_receipt = receipt;
+    ev.resume_waiting = c.resume_requested;
+    ev.cancel_waiting = c.cancel_requested;
     ev.task_id = c.rec.task_id;
     ev.kind = c.rec.kind;
     ev.state = c.rec.state;
@@ -260,6 +283,7 @@ struct Engine::Impl {
       ev.error = c.last_code;  // 真实分类：Rejected/Integrity/Timeout... 业务按此决定 UI 与重试策略
       ev.message = c.rec.last_error;
     }
+    if (c.cancel_cleanup_failed) { ev.error=Err::Io; ev.message="cancel cleanup failed"; }
     auto cb = user_cb;
     cbt->post([cb, ev] { cb(ev); });
   }
@@ -279,8 +303,40 @@ struct Engine::Impl {
     return true;
   }
 
+  bool quiescent(TaskCtx& c) {
+    c.work.erase(std::remove_if(c.work.begin(), c.work.end(), [](const auto& w) {
+      return w->done.load(std::memory_order_acquire);
+    }), c.work.end());
+    return c.work.empty();
+  }
+
+  std::shared_ptr<WorkToken> track_work(TaskCtx& c) {
+    quiescent(c);
+    auto token = std::make_shared<WorkToken>();
+    c.work.push_back(token);
+    return token;
+  }
+
+  uint64_t submit_compute(TaskCtx& c, ComputePool::Fn fn) {
+    auto token = track_work(c);
+    try {
+      token->compute_id = compute->submit([token, fn = std::move(fn)](const auto& canceled) {
+        WorkDone finished{token};
+        fn(canceled);
+      });
+      return token->compute_id;
+    } catch (...) { token->done.store(true, std::memory_order_release); throw; }
+  }
+
   void cancel_runtime(TaskCtx& c) {
-    for (auto& kv : c.http_ids) http->cancel(kv.second);
+    if (c.generation) c.generation = c.generation == std::numeric_limits<uint64_t>::max() ? 0 : c.generation + 1;
+    c.resume_requested = false;
+    c.cancel_requested = false;
+    for (const auto& token : c.work) {
+      if (token->done.load(std::memory_order_acquire)) continue;
+      if (token->http_id) http->cancel(token->http_id);
+      if (token->compute_id) compute->cancel(token->compute_id);
+    }
     c.http_ids.clear();
     c.inflight.clear();
     c.urls.clear();
@@ -288,10 +344,7 @@ struct Engine::Impl {
     c.ctrl_inflight = false;
     c.url_fetch_inflight = false;
     c.ctrl_retry_at = 0;
-    if (c.compute_job) {
-      compute->cancel(c.compute_job);
-      c.compute_job = 0;
-    }
+    c.compute_job = 0;
   }
 
   bool checkpoint(TaskCtx& c) {
@@ -332,6 +385,8 @@ struct Engine::Impl {
   // ---------- 控制面请求 ----------
   void post_http(const std::string& task_id, Op op, uint32_t part, HttpRequest req) {
     if (stopping.load(std::memory_order_relaxed)) return;  // 硬停期间不发新请求
+    auto task_state=tasks.find(task_id);
+    if(task_state==tasks.end()||task_state->second.cancel_requested)return;
     ControlOperation operation{};
     if(cfg.control_plane && control_operation(op,operation)) {
       ControlRequest input{req.method,req.url,req.body,req.headers};
@@ -354,11 +409,19 @@ struct Engine::Impl {
       req.url=std::move(mapped.value().url);
       for(auto& header:mapped.value().headers)req.headers.push_back(std::move(header));
     }
-    uint64_t hid = http->submit(std::move(req), [this, task_id, op, part](uint64_t, HttpResponse&& r) {
-      q.push(EvHttp{task_id, op, part, std::move(r)});  // 传输线程只投递
-    });
-    auto it = tasks.find(task_id);
-    if (it != tasks.end() && (op == Op::PutPart || op == Op::GetPart)) it->second.http_ids[part] = hid;
+    auto it = tasks.find(task_id); if (it == tasks.end()) return;
+    const auto generation = it->second.generation;
+    auto token = track_work(it->second);
+    uint64_t hid;
+    try {
+      hid = http->submit(std::move(req), [this, task_id, generation, op, part, token](uint64_t, HttpResponse&& r) {
+        WorkDone finished{token}; // transport closes file descriptors before calling done
+        EvHttp event; event.id=task_id; event.generation=generation; event.op=op;
+        event.part=part; event.resp=std::move(r); q.push(std::move(event));
+      });
+      token->http_id = hid;
+    } catch (...) { token->done.store(true, std::memory_order_release); throw; }
+    if (op == Op::PutPart || op == Op::GetPart) it->second.http_ids[part] = hid;
   }
 
   HttpRequest ctrl_req(const std::string& path, std::string body) {
@@ -438,10 +501,11 @@ struct Engine::Impl {
     std::string id = c.rec.task_id, src = c.rec.orig_path, dst = c.rec.staging_path;
     const int64_t remux_max = cfg.remux_max_bytes;
     auto* self = this;
-    c.compute_job = compute->submit([self, id, src, dst, planned,
+    c.compute_job = submit_compute(c, [generation=c.generation, self, id, src, dst, planned,
                                      remux_max](const std::atomic<bool>& canceled) {
       EvPrepared ev;
       ev.id = id;
+      ev.generation = generation;
       ev.planned_part = planned;
 
       // 对指定文件跑一遍 SHA-256 + 分片 CRC（remux 改写字节后重算指纹用）
@@ -646,9 +710,10 @@ struct Engine::Impl {
     std::string nonce = c.nonce;
     auto ranges = c.ranges;
     auto* self = this;
-    c.compute_job = compute->submit([self, id, path, nonce, ranges](const std::atomic<bool>& canceled) {
+    c.compute_job = submit_compute(c, [generation=c.generation, self, id, path, nonce, ranges](const std::atomic<bool>& canceled) {
       EvProof ev;
       ev.id = id;
+      ev.generation = generation;
       if (canceled.load()) {
         ev.err = make_err(Err::Canceled, "canceled");
         self->q.push(std::move(ev));
@@ -683,9 +748,10 @@ struct Engine::Impl {
     std::string id = c.rec.task_id, path = c.rec.staging_path;  // 下载 tmp
     std::string want = c.rec.sha256_hex;
     auto* self = this;
-    c.compute_job = compute->submit([self, id, path, want](const std::atomic<bool>& canceled) {
+    c.compute_job = submit_compute(c, [generation=c.generation, self, id, path, want](const std::atomic<bool>& canceled) {
       EvVerify ev;
       ev.id = id;
+      ev.generation = generation;
       Sha256 sha;
       int fd = open(path.c_str(), O_RDONLY);
       if (fd < 0) {
@@ -780,13 +846,26 @@ struct Engine::Impl {
     return v;
   }
 
+  void finish_pending_cancels() {
+    for (auto it=tasks.begin(); it!=tasks.end();) {
+      auto current=it++;
+      if (current->second.cancel_requested && quiescent(current->second)) {
+        const auto id=current->first; on_cancel(id);
+      }
+    }
+  }
+
   void pump() {
+    finish_pending_cancels();
+    // Never block the scheduler waiting for I/O: old workers may be posting to
+    // its bounded queue. Resume only after every retained work token completes.
+    for (auto& kv : tasks) if (!kv.second.cancel_requested && kv.second.resume_requested && quiescent(kv.second)) on_resume(kv.first);
     int64_t t = now();
     auto ordered = tasks_by_priority();
 
     // 1) 控制面退避到期 → 重驱动
     for (auto* c : ordered) {
-      if (!c->ctrl_inflight && c->ctrl_retry_at > 0 && c->ctrl_retry_at <= t) {
+      if (!c->cancel_requested && !c->ctrl_inflight && c->ctrl_retry_at > 0 && c->ctrl_retry_at <= t) {
         c->ctrl_retry_at = 0;
         drive_control(*c);
       }
@@ -800,7 +879,7 @@ struct Engine::Impl {
         ++started;
     for (auto* c : ordered) {
       if (started >= cfg.max_active_tasks) break;
-      if (c->rec.state != TaskState::Queued) continue;
+      if (c->cancel_requested || c->rec.state != TaskState::Queued) continue;
       start_task(*c);
       ++started;
     }
@@ -809,7 +888,7 @@ struct Engine::Impl {
     int streams = total_streams();
     for (auto* cp : ordered) {
       TaskCtx& c = *cp;
-      if (c.rec.state != TaskState::Transferring) continue;
+      if (c.cancel_requested || c.rec.state != TaskState::Transferring) continue;
       // 对账优先于传输：init/complete 在途时本任务不派发分片——
       // 否则 recover 后会按过期位图重传服务端已有的分片（真实 bug，收敛测试抓获）。
       if (c.ctrl_inflight) continue;
@@ -824,7 +903,7 @@ struct Engine::Impl {
                     ctrl_req("/v1/media/part_urls", build_part_urls(c.rec.upload_id, need_url)));
         }
       }
-      if (c.rec.state != TaskState::Transferring) continue; // encode failure may terminate this pump turn
+      if (c.cancel_requested || c.rec.state != TaskState::Transferring) continue; // encode failure may terminate this pump turn
       for (uint32_t p = 0; p < c.rec.nparts; ++p) {
         if (int(c.inflight.size()) >= cfg.max_parts_per_task) break;
         if (streams >= cfg.max_total_streams) return;
@@ -843,6 +922,7 @@ struct Engine::Impl {
   }
 
   void start_task(TaskCtx& c) {
+    if(c.cancel_requested)return;
     c.started_ms = now();
     if (c.rec.kind == TaskKind::Upload) {
       if (c.rec.streaming) {  // 流式：无 hash/size 直接开单，字节随 append 到达
@@ -872,9 +952,10 @@ struct Engine::Impl {
     std::string id = c.rec.task_id, sha = c.rec.sha256_hex, dest = c.rec.dest_path;
     MediaCache* mc = cache.get();
     auto* self = this;
-    c.compute_job = compute->submit([self, mc, id, sha, dest](const std::atomic<bool>& canceled) {
+    c.compute_job = submit_compute(c, [generation=c.generation, self, mc, id, sha, dest](const std::atomic<bool>& canceled) {
       EvCacheHit ev;
       ev.id = id;
+      ev.generation = generation;
       auto hit = mc->lookup(sha);
       if (!hit.ok()) {
         ev.err = hit.error();
@@ -921,6 +1002,7 @@ struct Engine::Impl {
     auto it = tasks.find(ev.id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if (!c.generation || ev.generation != c.generation) return;
     c.compute_job = 0;
     if (c.rec.state != TaskState::Preparing) return;
     if (ev.err) {           // 未命中/拷贝失败：回落正常下载（缓存只是优化，不是依赖）
@@ -953,6 +1035,7 @@ struct Engine::Impl {
     auto it = tasks.find(v.id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if(c.cancel_requested)return;
     if (!c.rec.streaming || c.stream_finishing) return;  // finish 后的迟到 append 丢弃
     if (c.rec.state == TaskState::Failed) return;
     if (c.stream_buf.size() + v.bytes.size() > 64u * 1024 * 1024)
@@ -965,6 +1048,7 @@ struct Engine::Impl {
     auto it = tasks.find(id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if(c.cancel_requested)return;
     if (!c.rec.streaming || c.stream_finishing) return;
     c.stream_finishing = true;
     maybe_stream_flush(c);
@@ -983,15 +1067,15 @@ struct Engine::Impl {
     size_t n = full ? ps : c.stream_buf.size();
     auto chunk = std::make_shared<std::vector<uint8_t>>(c.stream_buf.begin(),
                                                         c.stream_buf.begin() + long(n));
-    c.stream_buf.erase(c.stream_buf.begin(), c.stream_buf.begin() + long(n));
     uint32_t part = c.rec.nparts;
     int64_t off = int64_t(part) * c.rec.part_size;
     c.stream_flush_inflight = true;
     std::string id = c.rec.task_id, path = c.rec.staging_path;
     auto* self = this;
-    c.compute_job = compute->submit([self, id, path, chunk, part, off](const std::atomic<bool>& canceled) {
+    c.compute_job = submit_compute(c, [generation=c.generation, self, id, path, chunk, part, off](const std::atomic<bool>& canceled) {
       EvStreamFlushed ev;
       ev.id = id;
+      ev.generation = generation;
       ev.part = part;
       ev.len = int64_t(chunk->size());
       if (canceled.load()) {
@@ -1016,16 +1100,23 @@ struct Engine::Impl {
     auto it = tasks.find(ev.id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if (!c.generation || ev.generation != c.generation) return;
     c.stream_flush_inflight = false;
     c.compute_job = 0;
     if (c.rec.state != TaskState::Transferring) return;
     if (ev.err) return task_fail(c, ev.err.code, ev.err.msg);
     // 账本随分片生长：位图扩容保留已置位（from_blob 拷贝旧字节）
+    const auto old_nparts = c.rec.nparts; const auto old_size = c.rec.size;
+    auto old_bitmap = c.rec.bitmap;
     c.rec.nparts = ev.part + 1;
     c.rec.bitmap = PartBitmap::from_blob(c.rec.bitmap.blob(), c.rec.nparts);
     c.part_crcs.push_back(ev.crc);  // flush 严格顺序 → 索引即分片号
     c.rec.size += ev.len;
-    if (!checkpoint(c)) return;
+    if (!checkpoint(c)) {
+      c.rec.nparts = old_nparts; c.rec.size = old_size; c.rec.bitmap = std::move(old_bitmap);
+      c.part_crcs.pop_back(); return;
+    }
+    c.stream_buf.erase(c.stream_buf.begin(), c.stream_buf.begin() + std::min<size_t>(c.stream_buf.size(), size_t(ev.len)));
     maybe_stream_flush(c);     // 缓冲里可能还有整片
     maybe_stream_finalize(c);  // finish 已到且这是尾片时推进
     // 新分片的 PUT 由 loop 的 pump 派发
@@ -1041,9 +1132,10 @@ struct Engine::Impl {
       c.stream_hash_inflight = true;
       std::string id = c.rec.task_id, path = c.rec.staging_path;
       auto* self = this;
-      c.compute_job = compute->submit([self, id, path](const std::atomic<bool>& canceled) {
+      c.compute_job = submit_compute(c, [generation=c.generation, self, id, path](const std::atomic<bool>& canceled) {
         EvStreamHashed ev;
         ev.id = id;
+      ev.generation = generation;
         Sha256 sha;
         int fd = open(path.c_str(), O_RDONLY);
         if (fd < 0) {
@@ -1080,6 +1172,7 @@ struct Engine::Impl {
     auto it = tasks.find(ev.id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if (!c.generation || ev.generation != c.generation) return;
     c.stream_hash_inflight = false;
     c.compute_job = 0;
     if (c.rec.state != TaskState::Transferring) return;
@@ -1094,6 +1187,7 @@ struct Engine::Impl {
     auto it = tasks.find(ev.id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if (!c.generation || ev.generation != c.generation) return;
     c.compute_job = 0;
     if (c.rec.state != TaskState::Preparing) return;  // 已暂停/取消
     if (ev.err) return task_fail(c, ev.err.code, ev.err.msg);
@@ -1115,6 +1209,7 @@ struct Engine::Impl {
     auto it = tasks.find(ev.id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if (!c.generation || ev.generation != c.generation) return;
     c.compute_job = 0;
     if (c.rec.state != TaskState::Preparing) return;
     if (ev.err) return task_fail(c, ev.err.code, ev.err.msg);
@@ -1127,6 +1222,7 @@ struct Engine::Impl {
     auto it = tasks.find(ev.id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if (!c.generation || ev.generation != c.generation) return;
     c.compute_job = 0;
     if (c.rec.state != TaskState::Finalizing) return;
     if (ev.err) {
@@ -1145,6 +1241,7 @@ struct Engine::Impl {
     auto it = tasks.find(ev.id);
     if (it == tasks.end()) return;  // 任务已终态（取消晚到的事件）
     TaskCtx& c = it->second;
+    if (!c.generation || ev.generation != c.generation) return;
     // 暂停/失败态下晚到的事件：只清理在途标记，不推进任何状态（恢复时 init 幂等对账兜底）
     if (c.rec.state == TaskState::Paused || c.rec.state == TaskState::Failed) {
       if (ev.op == Op::PartUrls) c.url_fetch_inflight = false;
@@ -1201,12 +1298,21 @@ struct Engine::Impl {
         c.ranges = ans.ranges;
         return dispatch_proof(c);
       case InitAnswer::Kind::Upload: {
+        const auto local_parts = c.rec.nparts;
+        if (c.rec.streaming) {
+          if ((!c.rec.upload_id.empty() && c.rec.upload_id != ans.upload_id) ||
+              (local_parts && c.rec.part_size != ans.part_size))
+            return task_fail(c, Err::Protocol, "stream session geometry changed");
+          for (auto part : ans.received) if (part >= local_parts)
+            return task_fail(c, Err::Protocol, "stream received part outside local extent");
+        }
         c.rec.upload_id = ans.upload_id;
         c.rec.part_size = ans.part_size;
-        c.rec.nparts = ans.nparts;
+        // A live stream's total is local, not the server's unknown/null nparts.
+        c.rec.nparts = c.rec.streaming ? local_parts : ans.nparts;
         if (ans.part_size != c.planned_part) c.part_crcs.clear();  // CRC 口径失配则不发头
         // 服务端为真相源：received_parts 直接重建位图（架构 §10 对账）
-        PartBitmap bm(ans.nparts);
+        PartBitmap bm(c.rec.nparts);
         for (auto p : ans.received) bm.set(p);
         c.rec.bitmap = bm;
         c.rec.bytes_done = bytes_from_bitmap(c.rec);
@@ -1389,6 +1495,7 @@ struct Engine::Impl {
           if (c.rec.sha256_hex.empty()) {  // 无指纹可校：直接落位
             EvVerify ok;
             ok.id = c.rec.task_id;
+            ok.generation = c.generation;
             on_verify(ok);
           } else {
             dispatch_verify(c);
@@ -1442,6 +1549,15 @@ struct Engine::Impl {
     auto it = tasks.find(id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if(c.cancel_requested)return;
+    if (c.rec.state == TaskState::Failed && c.resume_requested) {
+      cancel_runtime(c); notify(c,"resume withdrawn"); return;
+    }
+    if (c.rec.state == TaskState::Paused) {
+      bool was_waiting=c.resume_requested; cancel_runtime(c);
+      if(was_waiting)notify(c,"resume withdrawn");
+      return;
+    }
     if (!fsm_can(c.rec.state, TaskState::Paused)) return;
     cancel_runtime(c);
     to_state(c, TaskState::Paused);
@@ -1451,7 +1567,26 @@ struct Engine::Impl {
     auto it = tasks.find(id);
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
+    if(c.cancel_requested)return;
     if (!fsm_resumable(c.rec.state)) return;
+    if (c.stream_recovery_blocked) {
+      cancel_runtime(c); c.rec.state=TaskState::Failed; c.rec.updated_at=now();
+      c.last_code=Err::State; c.rec.last_error="State: streaming task cannot resume after restart";
+      if(checkpoint(c))notify(c);
+      return;
+    }
+    const bool newly_requested = !c.resume_requested;
+    if (newly_requested) { cancel_runtime(c); c.resume_requested = true; }
+    if (!c.generation) {
+      c.resume_requested = false; c.last_code = Err::State;
+      c.rec.last_error = "State: task generation exhausted";
+      c.rec.state = TaskState::Failed; c.rec.updated_at = now();
+      if (checkpoint(c)) notify(c);
+      return;
+    }
+    if (!quiescent(c)) { if(newly_requested)notify(c,"resume waiting for prior I/O"); return; }
+    c.resume_requested = false;
+    c.stream_flush_inflight = false; c.stream_hash_inflight = false;
     c.attempts.clear();
     c.retry_at.clear();
     c.ctrl_attempts = 0;
@@ -1464,10 +1599,19 @@ struct Engine::Impl {
     if (it == tasks.end()) return;
     TaskCtx& c = it->second;
     if (!fsm_can(c.rec.state, TaskState::Canceled)) return;
-    cancel_runtime(c);
-    if (!to_state(c, TaskState::Canceled)) return;
-    if (!c.rec.staging_path.empty()) remove_file(c.rec.staging_path);
-    tasks.erase(id);  // journal 保留 Canceled 行供审计
+    const bool newly_requested = !c.cancel_requested;
+    if (newly_requested) { cancel_runtime(c); c.cancel_requested = true; }
+    if (!quiescent(c)) { if(newly_requested)notify(c,"cancel waiting for prior I/O"); return; }
+    // Two-phase, nonblocking cancellation. No old file writer remains now.
+    c.rec.state = TaskState::Canceled; c.rec.updated_at = now();
+    if (!checkpoint(c)) return; // clears pending intent; retain files/context on error
+    c.cancel_requested = false;
+    if (!c.rec.staging_path.empty() && ::unlink(c.rec.staging_path.c_str()) != 0 && errno != ENOENT) {
+      c.cancel_cleanup_failed = true;
+      IMMD_ELOG("cancel cleanup failed");
+    }
+    notify(c,"canceled");
+    tasks.erase(id);
   }
 
   void on_recover() {
@@ -1484,6 +1628,7 @@ struct Engine::Impl {
       auto& ctx = tasks[rec.task_id];
       ctx = std::move(c);
       TaskCtx& t = ctx;
+      t.stream_recovery_blocked = t.rec.streaming;
       // 流式任务不跨进程恢复：录音源已随进程消亡，缓冲不落账——诚实标记失败（架构 §14）
       if (t.rec.streaming && !fsm_terminal(t.rec.state) && t.rec.state != TaskState::Failed) {
         t.rec.state = TaskState::Failed;
@@ -1645,6 +1790,7 @@ Engine::~Engine() {
   if (impl_->sched.joinable()) impl_->sched.join();
   impl_->http.reset();       // 取消在途；回调向已关闭队列投递 → 安全丢弃
   impl_->compute.reset();
+  impl_->finish_pending_cancels(); // I/O joined; emit cleanup result before callback drain
   impl_->cbt.reset();        // 排空回调
 }
 

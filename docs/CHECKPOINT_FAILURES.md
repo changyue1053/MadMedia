@@ -23,8 +23,9 @@ the persisted journal, not the previous process's transient failure state.
 
 ## Cleanup and side effects
 
-Upload staging deletion on Ready, and upload/download staging deletion on cancel,
-now occur only after the target state checkpoint succeeds. Failed checkpoints
+Upload staging deletion on Ready occurs only after the target checkpoint.
+Cancel additionally waits for old task I/O to finish before its Canceled
+checkpoint, staging cleanup and terminal notification (see ATTEMPT_ISOLATION.md). Failed checkpoints
 retain those files and task context. Download cache fill is dispatched only
 after the Ready checkpoint succeeds. Applications still need a retention policy
 for abandoned tasks; this change does not delete old recovery evidence.
@@ -52,10 +53,9 @@ checks runtime Failed versus persisted Queued and explicit resume after recovery
 Allocation failures, physical power cuts, and mobile platforms are not qualified
 by these fault injections. Linux-only production gating remains unchanged.
 
-### Remaining cross-attempt limitation
+### Cross-attempt isolation
 
-Cancellation of workers/HTTP is cooperative, not an immediate join per task.
-Explicit resume can overlap late callbacks from the preceding attempt; events
-currently have no per-attempt generation isolation. This regression does not
-qualify that race or promise that old events cannot affect a resumed attempt.
-Host lifecycle/retry policy must account for this outstanding reliability item.
+Cancellation remains cooperative. Resume now waits for tracked old HTTP/compute
+I/O to finish, then starts a new generation; stale results are discarded before
+mutating the new attempt. See [attempt isolation](ATTEMPT_ISOLATION.md) for tested
+file-write ordering and the limits for stuck syscalls/conflicting destinations.

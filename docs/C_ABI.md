@@ -103,3 +103,16 @@ atomic snapshot reservation. Query does not pin data or receipts. Concurrent
 close serializes with the call; later calls return CLOSED. Native
 `Engine::query_persisted` has the same synchronous callback-thread prohibition
 as `query`; the latter retains its existing live-map-first semantics.
+
+## Cancel completion versus admission
+
+A successful cancel call admits an intent, not an immediate terminal result.
+The task retains its pending slot while old native I/O is still active. Only
+after I/O quiesces and the Canceled checkpoint succeeds does the terminal
+snapshot become available. Repeated cancel is safe. Canceled with `error=7`
+(native Io) indicates staging cleanup failed even though the task ended; the
+raw filesystem diagnostic/path is not exported. A journal checkpoint failure
+produces Failed instead and retains recovery files. If I/O never returns,
+cancel remains waiting and destroy may wait while joining it. Intent before
+the terminal checkpoint is not crash-persisted. Destroy still abandons
+unconsumed snapshots, so poll the terminal first when its outcome matters.

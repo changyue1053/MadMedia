@@ -27,3 +27,7 @@ C consumers may opt into `madmedia_create_v2` for NORMAL/FULL configuration and 
 Read-only reconciliation is available as native `query_persisted` and C `madmedia_query_persisted`, bypassing live task memory and without recovery/slot admission. A journal row is not proof of physical durability or original sync mode; NOT_FOUND is not proof of never submitted. C output excludes paths/error text. See [C ABI](docs/C_ABI.md).
 
 Later journal write errors now stop the affected task with in-memory Io Failed rather than advancing to an unrecorded target state. They do not recursively persist Failed or automatically retry. Cleanup is ordered after successful Ready/Cancel checkpoints; prior network/file side effects are not rolled back. See [checkpoint failures](docs/CHECKPOINT_FAILURES.md).
+
+Native resume now defers until prior task I/O completes, reporting `ProgressEvent::resume_waiting`, and stale results are generation-filtered. See [attempt isolation](docs/ATTEMPT_ISOLATION.md). Rebuild native consumers; this does not add a C resume API or serialize unrelated tasks sharing destination paths.
+
+Cancel now waits nonblockingly for prior I/O, with native `cancel_waiting`, then commits Canceled, cleans staging and emits one terminal. Cleanup failure is explicit Io on Canceled; waiting intent is not crash-persisted. Close joins I/O before finalizing pending cancels. See [attempt isolation](docs/ATTEMPT_ISOLATION.md).
