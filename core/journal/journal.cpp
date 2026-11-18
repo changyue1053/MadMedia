@@ -93,13 +93,30 @@ TaskRecord row_to_record(sqlite3_stmt* st) {
 
 }  // namespace
 
-Expected<std::unique_ptr<Journal>> Journal::open(const std::string& db_path) {
+Expected<std::unique_ptr<Journal>> Journal::open(const std::string& db_path, JournalDurability durability) {
+  if (durability != JournalDurability::Normal && durability != JournalDurability::Full)
+    return make_err(Err::State, "invalid journal durability");
   auto j = std::unique_ptr<Journal>(new Journal());
   if (sqlite3_open(db_path.c_str(), &j->db_) != SQLITE_OK) {
     return make_err(Err::Io, "journal open failed: " + db_path);
   }
-  // WAL + NORMAL：掉电最多丢最后一笔账（重启后 init 幂等对账兜底），绝不坏库。
-  if (Error e = j->exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")) return e;
+  // NORMAL can lose committed transactions after power loss. FULL asks SQLite
+  // to sync each WAL commit, subject to VFS/filesystem/hardware guarantees.
+  if (Error e = j->exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")) return e;
+  if (Error e = j->exec(durability == JournalDurability::Full
+      ? "PRAGMA synchronous=FULL;" : "PRAGMA synchronous=NORMAL;")) return e;
+  auto matches = [&](const char* sql, const char* expected) {
+    sqlite3_stmt* raw = nullptr;
+    if (sqlite3_prepare_v2(j->db_, sql, -1, &raw, nullptr) != SQLITE_OK) return false;
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> st(raw, sqlite3_finalize);
+    if (sqlite3_step(raw) != SQLITE_ROW) return false;
+    const auto* value = sqlite3_column_text(raw, 0);
+    const bool match = value && std::string(reinterpret_cast<const char*>(value)) == expected;
+    return match && sqlite3_step(raw) == SQLITE_DONE;
+  };
+  if (!matches("PRAGMA journal_mode", "wal") ||
+      !matches("PRAGMA synchronous", durability == JournalDurability::Full ? "2" : "1"))
+    return make_err(Err::Io, "journal durability configuration unavailable");
   if (Error e = j->exec(kDDL)) return e;
   if (sqlite3_prepare_v2(j->db_, kUpsert, -1, &j->upsert_, nullptr) != SQLITE_OK) {
     return make_err(Err::Io, std::string("journal prepare failed: ") + sqlite3_errmsg(j->db_));
@@ -125,32 +142,39 @@ Error Journal::exec(const char* sql) {
 Error Journal::save(const TaskRecord& r) {
   sqlite3_reset(upsert_);
   sqlite3_clear_bindings(upsert_);
-  auto bt = [&](int i, const std::string& s) { sqlite3_bind_text(upsert_, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+  int bind_error = SQLITE_OK;
+  auto bound = [&](int code) { if (code != SQLITE_OK) bind_error = code; };
+  auto bt = [&](int i, const std::string& s) { bound(sqlite3_bind_text(upsert_, i, s.c_str(), -1, SQLITE_TRANSIENT)); };
   bt(1, r.task_id);
-  sqlite3_bind_int(upsert_, 2, static_cast<int>(r.kind));
-  sqlite3_bind_int(upsert_, 3, static_cast<int>(r.state));
-  sqlite3_bind_int(upsert_, 4, static_cast<int>(r.priority));
+  bound(sqlite3_bind_int(upsert_, 2, static_cast<int>(r.kind)));
+  bound(sqlite3_bind_int(upsert_, 3, static_cast<int>(r.state)));
+  bound(sqlite3_bind_int(upsert_, 4, static_cast<int>(r.priority)));
   bt(5, r.orig_path);
   bt(6, r.staging_path);
   bt(7, r.dest_path);
   bt(8, r.mime);
-  sqlite3_bind_int64(upsert_, 9, r.size);
+  bound(sqlite3_bind_int64(upsert_, 9, r.size));
   bt(10, r.sha256_hex);
   bt(11, r.quick_hash_hex);
   bt(12, r.media_id);
   bt(13, r.upload_id);
-  sqlite3_bind_int64(upsert_, 14, r.part_size);
-  sqlite3_bind_int64(upsert_, 15, r.nparts);
+  bound(sqlite3_bind_int64(upsert_, 14, r.part_size));
+  bound(sqlite3_bind_int64(upsert_, 15, r.nparts));
   const auto& blob = r.bitmap.blob();
-  sqlite3_bind_blob(upsert_, 16, blob.empty() ? nullptr : blob.data(), static_cast<int>(blob.size()),
-                    SQLITE_TRANSIENT);
-  sqlite3_bind_int64(upsert_, 17, r.bytes_done);
-  sqlite3_bind_int(upsert_, 18, r.retry_count);
-  sqlite3_bind_int64(upsert_, 19, r.next_retry_at);
+  bound(sqlite3_bind_blob(upsert_, 16, blob.empty() ? nullptr : blob.data(), static_cast<int>(blob.size()),
+                    SQLITE_TRANSIENT));
+  bound(sqlite3_bind_int64(upsert_, 17, r.bytes_done));
+  bound(sqlite3_bind_int(upsert_, 18, r.retry_count));
+  bound(sqlite3_bind_int64(upsert_, 19, r.next_retry_at));
   bt(20, r.last_error);
-  sqlite3_bind_int64(upsert_, 21, r.created_at);
-  sqlite3_bind_int64(upsert_, 22, r.updated_at);
-  sqlite3_bind_int(upsert_, 23, r.streaming ? 1 : 0);
+  bound(sqlite3_bind_int64(upsert_, 21, r.created_at));
+  bound(sqlite3_bind_int64(upsert_, 22, r.updated_at));
+  bound(sqlite3_bind_int(upsert_, 23, r.streaming ? 1 : 0));
+  if (bind_error != SQLITE_OK) {
+    sqlite3_reset(upsert_);
+    sqlite3_clear_bindings(upsert_);
+    return make_err(Err::Io, "journal bind failed");
+  }
   if (sqlite3_step(upsert_) != SQLITE_DONE) {
     return make_err(Err::Io, std::string("journal save: ") + sqlite3_errmsg(db_));
   }
@@ -162,10 +186,14 @@ Expected<TaskRecord> Journal::load(const std::string& task_id) {
   sqlite3_stmt* st = nullptr;
   if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &st, nullptr) != SQLITE_OK)
     return make_err(Err::Io, sqlite3_errmsg(db_));
-  sqlite3_bind_text(st, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
-  Expected<TaskRecord> out = make_err(Err::NotFound, "task not found: " + task_id);
-  if (sqlite3_step(st) == SQLITE_ROW) out = row_to_record(st);
-  sqlite3_finalize(st);
+  std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> guard(st, sqlite3_finalize);
+  if (sqlite3_bind_text(st, 1, task_id.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK)
+    return make_err(Err::Io, "journal lookup bind failed");
+  int rc = sqlite3_step(st);
+  if (rc == SQLITE_DONE) return make_err(Err::NotFound, "task not found: " + task_id);
+  if (rc != SQLITE_ROW) return make_err(Err::Io, "journal lookup failed");
+  auto out = row_to_record(st);
+  if (sqlite3_step(st) != SQLITE_DONE) return make_err(Err::Io, "journal lookup incomplete");
   return out;
 }
 
@@ -174,9 +202,11 @@ Expected<std::vector<TaskRecord>> Journal::load_unfinished() {
   sqlite3_stmt* st = nullptr;
   if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &st, nullptr) != SQLITE_OK)
     return make_err(Err::Io, sqlite3_errmsg(db_));
+  std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> guard(st, sqlite3_finalize);
   std::vector<TaskRecord> out;
-  while (sqlite3_step(st) == SQLITE_ROW) out.push_back(row_to_record(st));
-  sqlite3_finalize(st);
+  int rc;
+  while ((rc = sqlite3_step(st)) == SQLITE_ROW) out.push_back(row_to_record(st));
+  if (rc != SQLITE_DONE) return make_err(Err::Io, "journal scan incomplete");
   return out;
 }
 
@@ -197,9 +227,11 @@ Expected<std::vector<TaskRecord>> Journal::load_all() {
   sqlite3_stmt* st = nullptr;
   if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &st, nullptr) != SQLITE_OK)
     return make_err(Err::Io, sqlite3_errmsg(db_));
+  std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> guard(st, sqlite3_finalize);
   std::vector<TaskRecord> out;
-  while (sqlite3_step(st) == SQLITE_ROW) out.push_back(row_to_record(st));
-  sqlite3_finalize(st);
+  int rc;
+  while ((rc = sqlite3_step(st)) == SQLITE_ROW) out.push_back(row_to_record(st));
+  if (rc != SQLITE_DONE) return make_err(Err::Io, "journal scan incomplete");
   return out;
 }
 

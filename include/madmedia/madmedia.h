@@ -8,6 +8,8 @@
 
 namespace madmedia {
 using Config = immd::Config;
+using JournalDurability = immd::JournalDurability;
+using JournalReceipt = immd::JournalReceipt;
 using ControlPlanePort = immd::ControlPlanePort;
 using DataPlanePort = immd::DataPlanePort;
 using TransferOperation = immd::TransferOperation;

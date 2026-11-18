@@ -27,6 +27,9 @@ struct DownloadRequest {
   std::string task_id;
 };
 
+// Initial task-record commit only, not file snapshot or transfer completion.
+enum class JournalReceipt { None = 0, Normal = 1, Full = 2, Failed = 3 };
+
 struct ProgressEvent {
   std::string task_id;
   TaskKind kind = TaskKind::Upload;
@@ -36,6 +39,7 @@ struct ProgressEvent {
   std::string media_id;  // Ready（上传/秒传）时携带
   Err error = Err::Ok;   // Failed 时携带
   std::string message;
+  JournalReceipt journal_receipt = JournalReceipt::None;
 };
 
 // 回调线程约定（三内核一致）：内核回调线程发出，业务自己切主线程；回调内禁止调用引擎 API 之外的内核对象。

@@ -68,7 +68,10 @@ struct TaskRecord {
   int64_t updated_at = 0;
 };
 
+enum class JournalDurability { Normal = 0, Full = 1 };
+
 struct Config {
+  JournalDurability journal_durability = JournalDurability::Normal;
   std::shared_ptr<const DataPlanePort> data_plane;
   std::vector<std::string> data_plane_allowed_origins; // explicit credential destination allowlist
   std::shared_ptr<const ControlPlanePort> control_plane; // optional pure protocol transform

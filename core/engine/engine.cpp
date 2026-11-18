@@ -243,9 +243,11 @@ struct Engine::Impl {
   int64_t now() const { return RealClock::instance().now_ms(); }
 
   // ---------- 通知 ----------
-  void notify(const TaskCtx& c, const char* msg = "") {
+  void notify(const TaskCtx& c, const char* msg = "",
+              JournalReceipt receipt = JournalReceipt::None) {
     if (!user_cb) return;
     ProgressEvent ev;
+    ev.journal_receipt = receipt;
     ev.task_id = c.rec.task_id;
     ev.kind = c.rec.kind;
     ev.state = c.rec.state;
@@ -1411,14 +1413,15 @@ struct Engine::Impl {
       failed.rec.state = TaskState::Failed;
       failed.rec.last_error = "journal enqueue failed";
       failed.last_code = e.code;
-      notify(failed);
+      notify(failed, "", JournalReceipt::Failed);
       return;
     }
     TaskCtx ctx;
     ctx.rec = std::move(rec);
     auto& c = tasks[ctx.rec.task_id];
     c = std::move(ctx);
-    notify(c, "queued");
+    notify(c, "queued", cfg.journal_durability == JournalDurability::Full
+        ? JournalReceipt::Full : JournalReceipt::Normal);
   }
 
   void on_pause(const std::string& id) {
@@ -1580,7 +1583,7 @@ Expected<std::unique_ptr<Engine>> Engine::start(Config cfg, ProgressCallback cb)
   auto directory_lock=DirectoryLock::acquire(cfg.data_dir);
   if(!directory_lock.ok())return directory_lock.error();
   if (Error e = mkdirs(cfg.data_dir + "/staging")) return e;
-  auto j = Journal::open(cfg.data_dir + "/journal.db");
+  auto j = Journal::open(cfg.data_dir + "/journal.db", cfg.journal_durability);
   if (!j.ok()) return j.error();
 
   auto eng = std::unique_ptr<Engine>(new Engine());

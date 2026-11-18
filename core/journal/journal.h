@@ -1,5 +1,5 @@
 // 任务账本（架构 §10）：SQLite/WAL 小库，只在调度线程访问（单写者）。
-// 纪律：状态变更与账本落盘同步完成——崩溃后账本即现场。
+// API admission is asynchronous; journal records do not snapshot source bytes.
 #pragma once
 
 #include <memory>
@@ -16,7 +16,8 @@ namespace immd {
 
 class Journal {
  public:
-  static Expected<std::unique_ptr<Journal>> open(const std::string& db_path);
+  static Expected<std::unique_ptr<Journal>> open(const std::string& db_path,
+      JournalDurability durability = JournalDurability::Normal);
   ~Journal();
 
   Journal(const Journal&) = delete;

@@ -19,3 +19,5 @@ Optional `Config::data_plane` adapts data-request URL/extra headers inside an ex
 Native task-ID defaults now share the Linux OS entropy provider with C ABI; new explicit IDs use restricted ASCII and duplicate admissions are rejected. See [native task IDs](docs/NATIVE_TASK_IDS.md), including the single-live-engine-per-directory and non-Linux qualification limits.
 
 On validated Linux builds, Engine holds cooperative exclusive ownership of its data directory until workers, callbacks and storage close; a second Engine/C handle is rejected. See [directory ownership](docs/DIRECTORY_OWNERSHIP.md), especially crash-vs-durability and hostile-directory limitations.
+
+Native `Config::journal_durability` optionally selects verified SQLite WAL/FULL; the default remains NORMAL. `ProgressEvent::journal_receipt` acknowledges only the initial task-record commit asynchronously, not source-byte persistence or completion. See [journal receipts](docs/JOURNAL_RECEIPTS.md) for delivery, failure, recovery and power-loss limits. C ABI v1 is unchanged. Rebuild C++ consumers.
