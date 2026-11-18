@@ -15,3 +15,5 @@ Initialization failures are reported as Err::Busy; created worker threads and CU
 Optional source-level `Config::control_plane` translates control HTTP wire protocols. See [control-plane port](docs/CONTROL_PLANE_PORT.md) for synchronous pure-transform, lifecycle, bounds and redaction rules. No C ABI adapter injection, data-plane replacement or asynchronous authentication refresh is included.
 
 Optional `Config::data_plane` adapts data-request URL/extra headers inside an explicit origin allowlist. See [data-plane request port](docs/DATA_PLANE_PORT.md) for same-origin, redirect, credential, native transfer preservation and lifecycle constraints. It does not replace the transport or add async authentication.
+
+Native task-ID defaults now share the Linux OS entropy provider with C ABI; new explicit IDs use restricted ASCII and duplicate admissions are rejected. See [native task IDs](docs/NATIVE_TASK_IDS.md), including the single-live-engine-per-directory and non-Linux qualification limits.

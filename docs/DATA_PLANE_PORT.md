@@ -20,7 +20,7 @@ Adapter exceptions, invalid results and disallowed origins become Protocol/Faile
 
 Tests require a fixture Authorization header on the real mock data plane, upload an 800KiB file in multiple parts, externally rotate the credential snapshot, then range-download and compare every byte. They verify part counts, shared ownership through close, rejected cross-origin/invalid/framing inputs, no transfer on adapter failure and no following a cross-origin redirect to a second server. This exercises the native media-v1 provider, not arbitrary cloud storage interoperability or a replacement transfer engine.
 
-Native C++ default task-ID generation still uses the legacy single-seed PRNG and is NOT equivalent to the C ABI's OS-128-bit ID provider. Treat that as an outstanding hardening blocker for broad production use. Three mobile platform packages/entropy/lifecycle remain unqualified. No release is made by this stage.
+The native default-ID single-seed PRNG identified during this stage has subsequently been replaced by the shared OS provider; see NATIVE_TASK_IDS.md for collision admission, fail-closed behavior and remaining cross-process ownership limits. Three mobile platform packages/entropy/lifecycle remain unqualified. No release is made by this stage.
 
 URL parsing follows the [libcurl URL API](https://curl.se/libcurl/c/curl_url_get.html): default ports are normalized, and zone IDs are separate from hostnames, so this adapter rejects zone IDs explicitly. Empty query/fragment syntax is also rejected in origin allowlist entries.
 

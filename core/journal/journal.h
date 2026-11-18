@@ -25,6 +25,7 @@ class Journal {
   Error save(const TaskRecord& r);                       // 全量 upsert（写频率低，简单优先）
   Expected<TaskRecord> load(const std::string& task_id);
   Expected<std::vector<TaskRecord>> load_unfinished();   // state ∉ {Ready, Canceled}
+  Expected<std::vector<std::string>> load_ids(); // ID inventory, errors must fail closed
   Expected<std::vector<TaskRecord>> load_all();          // 排障（immd-cli journal）
   Error remove(const std::string& task_id);
 

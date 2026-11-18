@@ -22,6 +22,11 @@ extern "C" int __wrap_open(const char* p,int flags,...){
  if(flags&O_CREAT){va_list args;va_start(args,flags);int permissions=va_arg(args,int);va_end(args);return __real_open(p,flags,permissions);}
  return __real_open(p,flags);
 }
+extern "C" int __real_close(int);
+extern "C" int __wrap_close(int fd){
+ if(fd==entropy_fd.load())entropy_fd=-1;
+ return __real_close(fd);
+}
 extern "C" ssize_t __wrap_read(int fd,void* data,size_t len){
  if(fd!=entropy_fd)return __real_read(fd,data,len);
  int n=++reads;

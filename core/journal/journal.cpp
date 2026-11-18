@@ -180,6 +180,18 @@ Expected<std::vector<TaskRecord>> Journal::load_unfinished() {
   return out;
 }
 
+Expected<std::vector<std::string>> Journal::load_ids() {
+  sqlite3_stmt* raw=nullptr;
+  if(sqlite3_prepare_v2(db_,"SELECT task_id FROM transfer_task",-1,&raw,nullptr)!=SQLITE_OK)
+    return make_err(Err::Io,"task ID inventory unavailable");
+  std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> st(raw,sqlite3_finalize);
+  std::vector<std::string> out;
+  int rc;
+  while((rc=sqlite3_step(st.get()))==SQLITE_ROW)out.push_back(col_text(st.get(),0));
+  if(rc!=SQLITE_DONE)return make_err(Err::Io,"task ID inventory unavailable");
+  return out;
+}
+
 Expected<std::vector<TaskRecord>> Journal::load_all() {
   std::string sql = std::string(kSelect) + " ORDER BY created_at";
   sqlite3_stmt* st = nullptr;

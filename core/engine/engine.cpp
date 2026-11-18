@@ -212,6 +212,26 @@ struct Engine::Impl {
   std::thread sched;
   std::atomic<bool> stopping{false};  // 硬停：排空期间不再派发任何新工作
   std::map<std::string, TaskCtx> tasks;
+  std::mutex ids_mutex;
+  std::set<std::string> reserved_ids; // includes persisted and newly admitted IDs
+  Expected<std::string> reserve_id(const std::string& requested,const char* prefix) {
+    std::string id;
+    try{id=requested.empty()?gen_id(prefix):requested;}
+    catch(const std::exception&){return make_err(Err::Busy,"task ID generation failed");}
+    if(id.empty()||id.size()>128)return make_err(Err::State,"invalid task ID");
+    for(unsigned char c:id)if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'))
+      return make_err(Err::State,"invalid task ID");
+    Expected<std::string> result(id); // allocate return value before reserving
+    std::lock_guard<std::mutex> lock(ids_mutex);
+    if(!reserved_ids.insert(id).second)return make_err(Err::State,"task ID already exists");
+    return result;
+  }
+  void unreserve_id(const std::string& id){std::lock_guard<std::mutex> lock(ids_mutex);reserved_ids.erase(id);}
+  struct IdAdmission {
+    Impl* owner;const std::string& id;bool committed=false;
+    ~IdAdmission(){if(!committed)owner->unreserve_id(id);}
+  };
+
   ThroughputEwma ewma;
   Backoff backoff;
   std::mt19937 rng{0xC0FFEE};
@@ -1564,6 +1584,9 @@ Expected<std::unique_ptr<Engine>> Engine::start(Config cfg, ProgressCallback cb)
   im.cfg = cfg;
   im.user_cb = std::move(cb);
   im.journal = std::move(j.value());
+  auto records=im.journal->load_ids();
+  if(!records.ok())return make_err(Err::Io,"task ID inventory unavailable");
+  for(const auto& id:records.value())im.reserved_ids.insert(id);
   im.backoff = Backoff{cfg.retry_base_ms, cfg.retry_cap_ms};
   im.cbt = std::make_unique<CallbackThread>();
   im.compute = std::make_unique<ComputePool>(int(std::min(4u, std::max(1u, std::thread::hardware_concurrency() - 1))));
@@ -1594,31 +1617,39 @@ Engine::~Engine() {
 Expected<std::string> Engine::upload(UploadRequest r) {
   if (!file_exists(r.file_path)) return make_err(Err::Io, "file not found: " + r.file_path);
   TaskRecord rec;
-  rec.task_id = r.task_id.empty() ? gen_id("t") : r.task_id;
+  auto generated=impl_->reserve_id(r.task_id,"t");if(!generated.ok())return generated.error();
+  std::string id=std::move(generated.value());
+  Impl::IdAdmission admission{impl_.get(),id};
+  rec.task_id = id;
   rec.kind = TaskKind::Upload;
   rec.state = TaskState::Queued;
   rec.priority = r.priority;
   rec.orig_path = r.file_path;
   rec.staging_path = impl_->cfg.data_dir + "/staging/" + rec.task_id + ".bin";
   rec.mime = r.mime;
-  std::string id = rec.task_id;
-  if (!impl_->q.try_push(CmdUpload{std::move(rec)})) return make_err(Err::Busy, "engine queue full");
-  return id;
+  Expected<std::string> result(id); // no return-value allocation after enqueue
+  if (!impl_->q.try_push(CmdUpload{std::move(rec)})) return make_err(Err::Busy,"engine queue full");
+  admission.committed=true;
+  return result;
 }
 
 Expected<std::string> Engine::download(DownloadRequest r) {
   if (r.media_id.empty() || r.dest_path.empty()) return make_err(Err::State, "media_id/dest required");
   TaskRecord rec;
-  rec.task_id = r.task_id.empty() ? gen_id("d") : r.task_id;
+  auto generated=impl_->reserve_id(r.task_id,"d");if(!generated.ok())return generated.error();
+  std::string id=std::move(generated.value());
+  Impl::IdAdmission admission{impl_.get(),id};
+  rec.task_id = id;
   rec.kind = TaskKind::Download;
   rec.state = TaskState::Queued;
   rec.priority = r.priority;
   rec.media_id = r.media_id;
   rec.dest_path = r.dest_path;
   rec.sha256_hex = r.sha256_hex;
-  std::string id = rec.task_id;
-  if (!impl_->q.try_push(CmdDownload{std::move(rec)})) return make_err(Err::Busy, "engine queue full");
-  return id;
+  Expected<std::string> result(id);
+  if (!impl_->q.try_push(CmdDownload{std::move(rec)})) return make_err(Err::Busy,"engine queue full");
+  admission.committed=true;
+  return result;
 }
 
 Error Engine::pause(const std::string& id) {
@@ -1639,16 +1670,20 @@ Error Engine::set_rate_limit(int64_t bytes_per_sec) {
 
 Expected<std::string> Engine::stream_begin(StreamBeginRequest r) {
   TaskRecord rec;
-  rec.task_id = gen_id("v");
+  auto generated=impl_->reserve_id({},"v");if(!generated.ok())return generated.error();
+  std::string id=std::move(generated.value());
+  Impl::IdAdmission admission{impl_.get(),id};
+  rec.task_id = id;
   rec.kind = TaskKind::Upload;
   rec.streaming = true;
   rec.state = TaskState::Queued;
   rec.priority = r.priority;
   rec.mime = r.mime;
   rec.staging_path = impl_->cfg.data_dir + "/staging/" + rec.task_id + ".bin";
-  std::string id = rec.task_id;
-  if (!impl_->q.try_push(CmdUpload{std::move(rec)})) return make_err(Err::Busy, "engine queue full");
-  return id;
+  Expected<std::string> result(id); // no return-value allocation after enqueue
+  if (!impl_->q.try_push(CmdUpload{std::move(rec)})) return make_err(Err::Busy,"engine queue full");
+  admission.committed=true;
+  return result;
 }
 
 Error Engine::stream_append(const std::string& task_id, const void* data, size_t len) {
