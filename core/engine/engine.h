@@ -30,6 +30,14 @@ struct DownloadRequest {
 // Initial task-record commit only, not file snapshot or transfer completion.
 enum class JournalReceipt { None = 0, Normal = 1, Full = 2, Failed = 3 };
 
+// Callback invocation outcome, not task/journal success. One faulted notification
+// counts once even if both observer and business callback throw. Sticky until close.
+struct CallbackHealth {
+  uint64_t faulted_invocations=0; // saturates at 2^60-1
+  bool callback_fault=false, observer_fault=false;
+  bool terminal_callback_fault=false, receipt_callback_fault=false;
+};
+
 struct ProgressEvent {
   std::string task_id;
   TaskKind kind = TaskKind::Upload;
@@ -58,6 +66,7 @@ class Engine {
   // 均为投递语义：快速失败（队列满 → Err::Busy），结果经 ProgressCallback 异步交付。
   Expected<std::string> upload(UploadRequest r);
   Expected<std::string> download(DownloadRequest r);
+  CallbackHealth callback_health() const noexcept; // allocation-free; safe in callbacks
   Error pause(const std::string& task_id);
   Error resume(const std::string& task_id);
   Error cancel(const std::string& task_id);

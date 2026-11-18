@@ -1,4 +1,5 @@
 #include "core/engine/engine.h"
+#include "core/engine/callback_fault.h"
 #include "core/engine/destination_registry.h"
 
 #include <fcntl.h>
@@ -143,13 +144,13 @@ overloaded(Ts...) -> overloaded<Ts...>;
 // ---------------- 回调线程（三内核约定：内核回调线程发出）----------------
 class CallbackThread {
  public:
-  CallbackThread() : th_([this] { run(); }) {}
+  explicit CallbackThread(std::atomic<uint64_t>& state) : fault_state_(state), th_([this] { run(); }) {}
   ~CallbackThread() {
     q_.close();
     th_.join();
   }
   bool is_current() const { return th_.get_id() == std::this_thread::get_id(); }
-  void post(std::function<void()> f) { q_.push(std::move(f)); }
+  void post(std::function<void()> f,bool terminal=false,bool receipt=false) { q_.push(Work{std::move(f),terminal,receipt}); }
 
  private:
   void run() {
@@ -159,10 +160,21 @@ class CallbackThread {
         if (q_.drained()) return;
         continue;
       }
-      try { (*f)(); } catch (...) { /* callback faults must not kill worker */ }
+      detail::CallbackFaultScope scope;
+      try { f->invoke(); } catch (...) { detail::report_callback_fault(false); }
+      if(scope.flags()) {
+        auto old=fault_state_.load(std::memory_order_relaxed);
+        while(!fault_state_.compare_exchange_weak(old,
+            detail::merge_callback_faults(old,scope.flags(),f->terminal,f->receipt),
+            std::memory_order_release,std::memory_order_relaxed)) {}
+        if((old>>4)==0)IMMD_ELOG("host callback fault; inspect callback health");
+      }
     }
   }
-  BoundedQueue<std::function<void()>> q_{4096};
+  struct Work { std::function<void()> invoke; bool terminal=false,receipt=false; };
+  static_assert(std::atomic<uint64_t>::is_always_lock_free,"callback health requires lock-free uint64 atomics");
+  std::atomic<uint64_t>& fault_state_;
+  BoundedQueue<Work> q_{4096};
   std::thread th_;
 };
 
@@ -232,6 +244,7 @@ struct Engine::Impl {
   std::unique_ptr<HttpClient> http;
   std::unique_ptr<ComputePool> compute;
   std::unique_ptr<MediaCache> cache;  // 可选（cfg.cache_capacity > 0）；自身线程安全
+  std::atomic<uint64_t> callback_fault_state{0}; // outlives callback worker during close
   std::unique_ptr<CallbackThread> cbt;
   BoundedQueue<Msg> q{4096};
   std::thread sched;
@@ -292,7 +305,7 @@ struct Engine::Impl {
     }
     if (c.cancel_cleanup_failed) { ev.error=Err::Io; ev.message="cancel cleanup failed"; }
     auto cb = user_cb;
-    cbt->post([cb, ev] { cb(ev); });
+    cbt->post([cb, ev] { cb(ev); }, c.rec.state==TaskState::Ready || c.rec.state==TaskState::Failed || c.rec.state==TaskState::Canceled, receipt!=JournalReceipt::None);
   }
 
   // ---------- 状态变更（唯一入口：fsm 校验 + journal 落账 + 通知）----------
@@ -1780,7 +1793,7 @@ Expected<std::unique_ptr<Engine>> Engine::start(Config cfg, ProgressCallback cb)
   if(!records.ok())return make_err(Err::Io,"task ID inventory unavailable");
   for(const auto& id:records.value())im.reserved_ids.insert(id);
   im.backoff = Backoff{cfg.retry_base_ms, cfg.retry_cap_ms};
-  im.cbt = std::make_unique<CallbackThread>();
+  im.cbt = std::make_unique<CallbackThread>(im.callback_fault_state);
   im.compute = std::make_unique<ComputePool>(int(std::min(4u, std::max(1u, std::thread::hardware_concurrency() - 1))));
   im.http = std::make_unique<HttpClient>(cfg.max_total_streams);
   if (cfg.cache_capacity > 0) {
@@ -1854,6 +1867,11 @@ Expected<std::string> Engine::download(DownloadRequest r) {
   admission.committed=true;
   path_admission.committed=true;
   return result;
+}
+
+CallbackHealth Engine::callback_health() const noexcept {
+  const uint64_t state=impl_->callback_fault_state.load(std::memory_order_acquire);
+  return CallbackHealth{state>>4,bool(state&1u),bool(state&2u),bool(state&4u),bool(state&8u)};
 }
 
 Error Engine::pause(const std::string& id) {

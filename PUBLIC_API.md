@@ -36,3 +36,8 @@ Downloads reserve output, `.part` and `.cachetmp` paths through Engine shutdown
 (maximum 4096 accepted downloads per lifetime). Conflicting/unsafe paths reject
 admission; legacy relative output rows reject startup rather than guessing cwd.
 See [destination ownership](docs/DESTINATION_OWNERSHIP.md) before upgrading.
+
+Native `Engine::callback_health()` reports contained host callback/observer
+exceptions without calling a failing callback again. It is nonblocking on a live
+Engine; it is not a delivery/commit acknowledgement or a self-destruction guard.
+See [callback health](docs/CALLBACK_HEALTH.md).

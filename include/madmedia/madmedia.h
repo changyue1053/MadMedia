@@ -1,5 +1,6 @@
 #pragma once
 #include "core/engine/engine.h"
+#include "core/engine/callback_fault.h"
 #include "core/protocol/service_port.h"
 #include "core/protocol/transfer_port.h"
 #include "core/pipeline/image/image_pipeline.h"
@@ -22,6 +23,7 @@ using Engine = immd::Engine;
 using UploadRequest = immd::UploadRequest;
 using DownloadRequest = immd::DownloadRequest;
 using ProgressEvent = immd::ProgressEvent;
+using CallbackHealth = immd::CallbackHealth;
 using ProgressCallback = immd::ProgressCallback;
 using TaskKind = immd::TaskKind;
 using TaskState = immd::TaskState;
@@ -43,10 +45,10 @@ using ObserverPort = std::function<void(const Observation&)>;
 inline ProgressCallback observe(ProgressCallback callback, ObserverPort observer = {}) {
   return [callback = std::move(callback), observer = std::move(observer)](const ProgressEvent& e) {
     if (observer) {
-      try { observer(Observation{e.kind, e.state, e.error}); } catch (...) {}
+      try { observer(Observation{e.kind, e.state, e.error}); } catch (...) { immd::detail::report_callback_fault(true); }
     }
     if (callback) {
-      try { callback(e); } catch (...) {} // do not terminate the callback worker
+      try { callback(e); } catch (...) { immd::detail::report_callback_fault(false); } // contained, externally observable
     }
   };
 }
