@@ -17,3 +17,5 @@ Optional source-level `Config::control_plane` translates control HTTP wire proto
 Optional `Config::data_plane` adapts data-request URL/extra headers inside an explicit origin allowlist. See [data-plane request port](docs/DATA_PLANE_PORT.md) for same-origin, redirect, credential, native transfer preservation and lifecycle constraints. It does not replace the transport or add async authentication.
 
 Native task-ID defaults now share the Linux OS entropy provider with C ABI; new explicit IDs use restricted ASCII and duplicate admissions are rejected. See [native task IDs](docs/NATIVE_TASK_IDS.md), including the single-live-engine-per-directory and non-Linux qualification limits.
+
+On validated Linux builds, Engine holds cooperative exclusive ownership of its data directory until workers, callbacks and storage close; a second Engine/C handle is rejected. See [directory ownership](docs/DIRECTORY_OWNERSHIP.md), especially crash-vs-durability and hostile-directory limitations.

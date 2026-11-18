@@ -27,5 +27,6 @@ int main(int argc,char** argv) {
  c.data_dir="/tmp/madmedia-thread-failure-"+std::to_string(getpid());
  auto e=madmedia::start(c);
  CHECK(!e.ok()); CHECK(e.error().code==madmedia::Err::Busy);
+ fail_at=0;auto reopened=madmedia::start(c);CHECK(reopened.ok());reopened.value().reset();
  std::filesystem::remove_all(c.data_dir);
 }

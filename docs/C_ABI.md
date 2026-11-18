@@ -22,7 +22,7 @@ Submit always requires a task-id output buffer >= MADMEDIA_TASK_ID_CAPACITY (128
 
 Slots pre-reserve task ID and media ID storage. Media ID >4096 bytes or callback copy failure sets sticky INTERNAL, visible on poll and new submissions. Such callback-copy failure is not reported as delivery or a silent dropped terminal. Poll serialization allocation failure is different: it returns INTERNAL without consuming the pending snapshot, so retry is permitted. Destroy remains available; recovery/reconciliation APIs are not in this substage. No claim is made that arbitrary native allocation failures or process crashes can preserve in-memory events. Persistent journal semantics remain the native engine's responsibility.
 
-The slot bound is not a process-wide RAM cap; native transfer/compute buffers have separate budgets. The service must obey its protocol/resource limits. Applications must use separate account-private directories and must not open concurrent engines against the same directory; directory locking remains a future hardening item.
+The slot bound is not a process-wide RAM cap; native transfer/compute buffers have separate budgets. The service must obey its protocol/resource limits. Applications must use separate account-private directories and must not open concurrent engines against the same directory; Linux directory ownership locking rejects a second cooperating engine; see DIRECTORY_OWNERSHIP.md.
 
 ## Tests
 

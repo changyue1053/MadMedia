@@ -12,7 +12,7 @@ An admission guard releases a new reservation if record construction, return-val
 
 Queue acceptance is not a durability acknowledgment. The scheduler saves the initial journal row before transfer; initial save failure emits Failed and retains the in-process reservation. Crash before persistence can lose an accepted queued task; no durable-submission guarantee is added. After restart, only durable rows populate the inventory. Supplied IDs for never-persisted tasks may be admitted again; new default IDs draw fresh OS entropy.
 
-This is NOT a cross-process lock. Two live engines must never share a data directory, and external edits/deletes to an active journal are unsupported. Persistent file locking / cross-process atomic admission remains a separate production-hardening gate. This stage does not claim SQLite transaction bridging with MadDB.
+This is NOT a cross-process lock. Two live engines must never share a data directory, and external edits/deletes to an active journal are unsupported. Linux cooperating engines now also use directory ownership locking described in DIRECTORY_OWNERSHIP.md. The in-memory set itself is not a cross-process allocator, and durable submission remains a separate gate. This stage does not claim SQLite transaction bridging with MadDB.
 
 ## Tests
 

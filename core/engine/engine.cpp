@@ -26,6 +26,7 @@
 #include "core/parser/mp4box.h"
 #include "core/crypto/sha256.h"
 #include "core/protocol/api.h"
+#include "core/platform/directory_lock.h"
 #include "core/protocol/service_port.h"
 #include "core/protocol/transfer_port.h"
 #include "core/scheduler/adaptive.h"
@@ -201,6 +202,7 @@ int64_t bytes_from_bitmap(const TaskRecord& r) {
 
 // ================= Impl =================
 struct Engine::Impl {
+  std::unique_ptr<DirectoryLock> directory_lock; // declared first: destroyed last
   Config cfg;
   ProgressCallback user_cb;
   std::unique_ptr<Journal> journal;  // 仅调度线程
@@ -1574,6 +1576,9 @@ Expected<std::unique_ptr<Engine>> Engine::start(Config cfg, ProgressCallback cb)
     return make_err(Err::State,"data-plane origin allowlist required");
   if (cfg.base_url.empty() || cfg.data_dir.empty())
     return make_err(Err::State, "base_url/data_dir required");
+  if (Error e = mkdirs(cfg.data_dir)) return e;
+  auto directory_lock=DirectoryLock::acquire(cfg.data_dir);
+  if(!directory_lock.ok())return directory_lock.error();
   if (Error e = mkdirs(cfg.data_dir + "/staging")) return e;
   auto j = Journal::open(cfg.data_dir + "/journal.db");
   if (!j.ok()) return j.error();
@@ -1581,9 +1586,12 @@ Expected<std::unique_ptr<Engine>> Engine::start(Config cfg, ProgressCallback cb)
   auto eng = std::unique_ptr<Engine>(new Engine());
   eng->impl_ = std::make_unique<Impl>();
   auto& im = *eng->impl_;
-  im.cfg = cfg;
+  im.cfg = cfg; // may allocate: journal + ownership remain local until copy succeeds
   im.user_cb = std::move(cb);
+  // Both transfers are noexcept. Before them, locals close journal before lock;
+  // after them, Impl's declaration order provides the same lifetime guarantee.
   im.journal = std::move(j.value());
+  im.directory_lock=std::move(directory_lock.value());
   auto records=im.journal->load_ids();
   if(!records.ok())return make_err(Err::Io,"task ID inventory unavailable");
   for(const auto& id:records.value())im.reserved_ids.insert(id);
