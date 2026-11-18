@@ -3,10 +3,12 @@
 
 #include <cstdint>
 #include <string>
+#include <memory>
 
 #include "core/util/bitmap.h"
 
 namespace immd {
+class ControlPlanePort;
 
 enum class TaskKind : int { Upload = 0, Download = 1 };
 
@@ -65,6 +67,7 @@ struct TaskRecord {
 };
 
 struct Config {
+  std::shared_ptr<const ControlPlanePort> control_plane; // optional pure protocol transform
   std::string base_url;             // mock/真实控制面，如 http://127.0.0.1:8787
   std::string tenant_id = "t_dev";
   std::string data_dir;             // journal.db / staging/ / cache/ 的根目录

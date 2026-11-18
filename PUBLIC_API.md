@@ -11,3 +11,5 @@ Observation v1 contains only TaskKind [0,1], TaskState [0,7], Err [0,13]. Option
 The callback observer is contractually nonblocking, not isolated against a malicious or stalled observer. A dedicated bounded telemetry delivery queue is future work before claiming strong noninterference.
 
 Initialization failures are reported as Err::Busy; created worker threads and CURLM are cleaned up. Destruction checks scheduler joinability. Callback exceptions are contained in the native callback worker too.
+
+Optional source-level `Config::control_plane` translates control HTTP wire protocols. See [control-plane port](docs/CONTROL_PLANE_PORT.md) for synchronous pure-transform, lifecycle, bounds and redaction rules. No C ABI adapter injection, data-plane replacement or asynchronous authentication refresh is included.

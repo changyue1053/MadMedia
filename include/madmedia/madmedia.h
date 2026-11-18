@@ -1,11 +1,16 @@
 #pragma once
 #include "core/engine/engine.h"
+#include "core/protocol/service_port.h"
 #include "core/pipeline/image/image_pipeline.h"
 #include <functional>
 #include <utility>
 
 namespace madmedia {
 using Config = immd::Config;
+using ControlPlanePort = immd::ControlPlanePort;
+using ControlOperation = immd::ControlOperation;
+using ControlRequest = immd::ControlRequest;
+using ControlResponse = immd::ControlResponse;
 using Engine = immd::Engine;
 using UploadRequest = immd::UploadRequest;
 using DownloadRequest = immd::DownloadRequest;

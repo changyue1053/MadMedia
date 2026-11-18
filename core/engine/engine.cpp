@@ -26,6 +26,7 @@
 #include "core/parser/mp4box.h"
 #include "core/crypto/sha256.h"
 #include "core/protocol/api.h"
+#include "core/protocol/service_port.h"
 #include "core/scheduler/adaptive.h"
 #include "core/scheduler/fsm.h"
 #include "core/scheduler/retry.h"
@@ -42,6 +43,18 @@ namespace {
 
 // ---------------- 消息（命令 + 事件）----------------
 enum class Op : int { Init, PartUrls, PutPart, Complete, Challenge, DlUrl, GetPart, MediaStatus };
+bool control_operation(Op op,ControlOperation& out) {
+ switch(op){
+ case Op::Init:out=ControlOperation::Init;return true;
+ case Op::PartUrls:out=ControlOperation::PartUrls;return true;
+ case Op::Complete:out=ControlOperation::Complete;return true;
+ case Op::Challenge:out=ControlOperation::Challenge;return true;
+ case Op::DlUrl:out=ControlOperation::DownloadUrl;return true;
+ case Op::MediaStatus:out=ControlOperation::MediaStatus;return true;
+ default:return false;
+ }
+}
+
 
 struct CmdUpload { TaskRecord rec; };
 struct CmdDownload { TaskRecord rec; };
@@ -258,9 +271,13 @@ struct Engine::Impl {
   void task_fail(TaskCtx& c, Err e, const std::string& msg) {
     cancel_runtime(c);
     c.last_code = e;
-    c.rec.last_error = std::string(err_name(e)) + ": " + msg;
+    // Parser diagnostics may contain decoded wire values. Redact centrally so
+    // every protocol parse failure is safe across event, log and journal sinks.
+    const std::string diagnostic = cfg.control_plane && e == Err::Protocol
+        ? "control protocol rejected" : msg;
+    c.rec.last_error = std::string(err_name(e)) + ": " + diagnostic;
     IMMD_WLOG("task %s failed: %s", c.rec.task_id.c_str(), c.rec.last_error.c_str());
-    to_state(c, TaskState::Failed, msg.c_str());
+    to_state(c, TaskState::Failed, diagnostic.c_str());
     // Failed 保留断点与 staging：手动/条件恢复从账本原地续传
   }
 
@@ -275,6 +292,18 @@ struct Engine::Impl {
   // ---------- 控制面请求 ----------
   void post_http(const std::string& task_id, Op op, uint32_t part, HttpRequest req) {
     if (stopping.load(std::memory_order_relaxed)) return;  // 硬停期间不发新请求
+    ControlOperation operation{};
+    if(cfg.control_plane && control_operation(op,operation)) {
+      ControlRequest input{req.method,req.url,req.body,req.headers};
+      auto mapped=encode_control(*cfg.control_plane,operation,input);
+      if(!mapped.ok()) {
+        auto task=tasks.find(task_id);
+        if(task!=tasks.end())task_fail(task->second,Err::Protocol,"control adapter rejected");
+        return;
+      }
+      auto value=std::move(mapped.value());req.method=std::move(value.method);
+      req.url=std::move(value.url);req.body=std::move(value.body);req.headers=std::move(value.headers);
+    }
     uint64_t hid = http->submit(std::move(req), [this, task_id, op, part](uint64_t, HttpResponse&& r) {
       q.push(EvHttp{task_id, op, part, std::move(r)});  // 传输线程只投递
     });
@@ -745,6 +774,7 @@ struct Engine::Impl {
                     ctrl_req("/v1/media/part_urls", build_part_urls(c.rec.upload_id, need_url)));
         }
       }
+      if (c.rec.state != TaskState::Transferring) continue; // encode failure may terminate this pump turn
       for (uint32_t p = 0; p < c.rec.nparts; ++p) {
         if (int(c.inflight.size()) >= cfg.max_parts_per_task) break;
         if (streams >= cfg.max_total_streams) return;
@@ -1075,6 +1105,12 @@ struct Engine::Impl {
         c.ctrl_inflight = false;
       }
       return;
+    }
+    ControlOperation operation{};
+    if(cfg.control_plane && ev.resp.err==Err::Ok && control_operation(ev.op,operation)) {
+      auto mapped=decode_control(*cfg.control_plane,operation,{ev.resp.status,ev.resp.body});
+      if(!mapped.ok())return task_fail(c,Err::Protocol,"control adapter rejected");
+      ev.resp.status=mapped.value().status;ev.resp.body=std::move(mapped.value().body);
     }
     switch (ev.op) {
       case Op::Init: return on_init(c, ev.resp);
