@@ -41,3 +41,7 @@ Native `Engine::callback_health()` reports contained host callback/observer
 exceptions without calling a failing callback again. It is nonblocking on a live
 Engine; it is not a delivery/commit acknowledgement or a self-destruction guard.
 See [callback health](docs/CALLBACK_HEALTH.md).
+
+Installed multi-app consumers and the bounded host cross-compiler gate are in
+[package integration](docs/PACKAGE_MULTI_APP.md). The two apps have independent
+journals; optional MadObs coverage is the observer contract, not runtime export.
