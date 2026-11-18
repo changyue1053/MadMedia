@@ -85,3 +85,15 @@ fixed logs without secret exception strings, direct non-Engine observe calls,
 and close waiting for a deliberately blocked callback. These are deterministic
 host tests, not mobile qualification or exhaustive concurrent lifecycle proof.
 Sanitizer results and any runtime limitations are in the phase publication record.
+
+## Synchronous query rejection during close (M14a)
+
+The callback-thread identity is captured once before the scheduler starts and
+kept in the implementation until callback drain finishes. Both native `query`
+and `query_persisted` compare that immutable identity, not the callback worker's
+resetting unique_ptr. An in-flight callback therefore still gets State when it
+attempts either synchronous query while another thread closes the Engine. This
+is a safe rejection, not permission to perform synchronous work in callbacks.
+It does not make arbitrary external API calls racing destruction supported.
+The regression waits for the actual callback pthread_join entry during close,
+then checks both rejections and the existing nonzero health snapshot.
