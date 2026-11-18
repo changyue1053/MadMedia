@@ -4,11 +4,13 @@
 #include <cstdint>
 #include <string>
 #include <memory>
+#include <vector>
 
 #include "core/util/bitmap.h"
 
 namespace immd {
 class ControlPlanePort;
+class DataPlanePort;
 
 enum class TaskKind : int { Upload = 0, Download = 1 };
 
@@ -67,6 +69,8 @@ struct TaskRecord {
 };
 
 struct Config {
+  std::shared_ptr<const DataPlanePort> data_plane;
+  std::vector<std::string> data_plane_allowed_origins; // explicit credential destination allowlist
   std::shared_ptr<const ControlPlanePort> control_plane; // optional pure protocol transform
   std::string base_url;             // mock/真实控制面，如 http://127.0.0.1:8787
   std::string tenant_id = "t_dev";

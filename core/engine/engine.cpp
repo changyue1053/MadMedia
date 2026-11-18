@@ -27,6 +27,7 @@
 #include "core/crypto/sha256.h"
 #include "core/protocol/api.h"
 #include "core/protocol/service_port.h"
+#include "core/protocol/transfer_port.h"
 #include "core/scheduler/adaptive.h"
 #include "core/scheduler/fsm.h"
 #include "core/scheduler/retry.h"
@@ -273,7 +274,7 @@ struct Engine::Impl {
     c.last_code = e;
     // Parser diagnostics may contain decoded wire values. Redact centrally so
     // every protocol parse failure is safe across event, log and journal sinks.
-    const std::string diagnostic = cfg.control_plane && e == Err::Protocol
+    const std::string diagnostic = cfg.data_plane ? "data operation failed" : cfg.control_plane && e == Err::Protocol
         ? "control protocol rejected" : msg;
     c.rec.last_error = std::string(err_name(e)) + ": " + diagnostic;
     IMMD_WLOG("task %s failed: %s", c.rec.task_id.c_str(), c.rec.last_error.c_str());
@@ -303,6 +304,16 @@ struct Engine::Impl {
       }
       auto value=std::move(mapped.value());req.method=std::move(value.method);
       req.url=std::move(value.url);req.body=std::move(value.body);req.headers=std::move(value.headers);
+    }
+    if(cfg.data_plane && (op==Op::PutPart || op==Op::GetPart)) {
+      auto task=tasks.find(task_id);if(task==tasks.end())return;
+      const auto& rec=task->second.rec;
+      auto mapped=prepare_transfer(*cfg.data_plane,cfg.data_plane_allowed_origins,
+          {op==Op::PutPart?TransferOperation::UploadPart:TransferOperation::DownloadPart,
+           req.url,int64_t(part)*rec.part_size,part_len(rec,part)});
+      if(!mapped.ok()){task_fail(task->second,Err::Protocol,"transfer adapter rejected");return;}
+      req.url=std::move(mapped.value().url);
+      for(auto& header:mapped.value().headers)req.headers.push_back(std::move(header));
     }
     uint64_t hid = http->submit(std::move(req), [this, task_id, op, part](uint64_t, HttpResponse&& r) {
       q.push(EvHttp{task_id, op, part, std::move(r)});  // 传输线程只投递
@@ -786,6 +797,7 @@ struct Engine::Impl {
         if (!take_rate(part_len(c.rec, p))) return;  // 限速：本轮到此为止
         if (c.rec.kind == TaskKind::Upload) dispatch_put(c, p);
         else dispatch_get(c, p);
+        if(c.rec.state!=TaskState::Transferring)break;
         ++streams;
       }
     }
@@ -1538,6 +1550,8 @@ struct Engine::Impl {
 
 // ================= 公共 API =================
 Expected<std::unique_ptr<Engine>> Engine::start(Config cfg, ProgressCallback cb) try {
+  if (cfg.data_plane && !valid_transfer_origins(cfg.data_plane_allowed_origins))
+    return make_err(Err::State,"data-plane origin allowlist required");
   if (cfg.base_url.empty() || cfg.data_dir.empty())
     return make_err(Err::State, "base_url/data_dir required");
   if (Error e = mkdirs(cfg.data_dir + "/staging")) return e;

@@ -196,6 +196,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.rfile.read(min(4096, int(self.headers.get("Content-Length", 0))))
                 raise ConnectionAbortedError("injected connection drop")
         body = self._read_body_shaped()  # 先消费（见 do_POST 注释）
+        required = S.faults.get("require_data_authorization")
+        if required and self.headers.get("Authorization") != required:
+            return self._send(403, {"error": "data authorization required"})
         m = re.match(r"^/store/([^/]+)/(\d+)\?(.*)$", self.path)
         if not m:
             return self._send(404, {"error": "bad store path"})
@@ -237,6 +240,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._slow()
+        if self.path == "/test/redirect":
+            return self._send(302, {}, {"Location": S.faults.get("test_redirect_to", "/test/sink")})
+        if self.path == "/test/sink":
+            with S.lock:
+                S.stats["test_sink_hits"] = S.stats.get("test_sink_hits", 0) + 1
+            return self._send(200, {})
         if self.path == "/admin/stats":
             with S.lock:
                 return self._send(200, {"stats": S.stats, "faults": S.faults,
@@ -424,6 +433,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 数据面下载 ----------
     def h_obj_get(self, media_id, query):
+        required = S.faults.get("require_data_authorization")
+        if required and self.headers.get("Authorization") != required:
+            return self._send(403, {"error": "data authorization required"})
         from urllib.parse import parse_qs
         q = parse_qs(query)
         if not self._check_sig(f"/store/obj/{media_id}", q):

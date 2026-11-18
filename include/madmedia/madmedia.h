@@ -1,6 +1,7 @@
 #pragma once
 #include "core/engine/engine.h"
 #include "core/protocol/service_port.h"
+#include "core/protocol/transfer_port.h"
 #include "core/pipeline/image/image_pipeline.h"
 #include <functional>
 #include <utility>
@@ -8,6 +9,10 @@
 namespace madmedia {
 using Config = immd::Config;
 using ControlPlanePort = immd::ControlPlanePort;
+using DataPlanePort = immd::DataPlanePort;
+using TransferOperation = immd::TransferOperation;
+using TransferRequest = immd::TransferRequest;
+using TransferTarget = immd::TransferTarget;
 using ControlOperation = immd::ControlOperation;
 using ControlRequest = immd::ControlRequest;
 using ControlResponse = immd::ControlResponse;
