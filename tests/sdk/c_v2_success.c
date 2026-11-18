@@ -26,6 +26,10 @@ int main(void) {
   if(status!=MADMEDIA_OK&&status!=MADMEDIA_EMPTY)goto cleanup;
   usleep(1000);
  }
+ if(result==0){size_t n=0;
+  if(madmedia_query_persisted(h,id,buf,sizeof(buf),&n)!=MADMEDIA_OK||
+     !strstr(buf,"\"persisted_record\":true"))result=5;
+ }
 cleanup:
  if(h&&madmedia_destroy(h)!=MADMEDIA_OK)result=4;
  /* Only exact known fixture paths after native shutdown. Never recursive deletion. */

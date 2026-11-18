@@ -79,6 +79,8 @@ class Engine {
 
   // 同步查询（排障/测试用；生产 UI 走 ProgressCallback）
   Expected<TaskRecord> query(const std::string& task_id);
+  // Read the journal only, not live in-memory task state. Same thread restrictions.
+  Expected<TaskRecord> query_persisted(const std::string& task_id);
 
  private:
   Engine() = default;

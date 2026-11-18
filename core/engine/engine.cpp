@@ -68,6 +68,7 @@ struct CmdSetRate {
   int64_t bps = 0;
 };
 struct CmdQuery {
+  bool persisted_only = false;
   std::string id;
   std::shared_ptr<std::promise<Expected<TaskRecord>>> pr;
 };
@@ -1514,12 +1515,20 @@ struct Engine::Impl {
   }
 
   void on_query(CmdQuery& cq) {
-    auto it = tasks.find(cq.id);
-    if (it != tasks.end()) {
-      cq.pr->set_value(it->second.rec);
-      return;
+    try {
+      if (!cq.persisted_only) {
+        auto it = tasks.find(cq.id);
+        if (it != tasks.end()) {
+          cq.pr->set_value(it->second.rec);
+          return;
+        }
+      }
+      cq.pr->set_value(journal->load(cq.id));
+    } catch (...) {
+      // Reading/copying a record can allocate. Propagate to the waiting caller,
+      // never terminate the scheduler or strand its future on allocation failure.
+      cq.pr->set_exception(std::current_exception());
     }
-    cq.pr->set_value(journal->load(cq.id));
   }
 
   // ---------- 主循环 ----------
@@ -1714,6 +1723,18 @@ Expected<TaskRecord> Engine::query(const std::string& id) {
   if (impl_->cbt && impl_->cbt->is_current())
     return make_err(Err::State, "synchronous query is forbidden on callback thread");
   CmdQuery cq;
+  cq.id = id;
+  cq.pr = std::make_shared<std::promise<Expected<TaskRecord>>>();
+  auto fut = cq.pr->get_future();
+  if (!impl_->q.try_push(std::move(cq))) return make_err(Err::Busy, "queue full");
+  return fut.get();
+}
+
+Expected<TaskRecord> Engine::query_persisted(const std::string& id) {
+  if (impl_->cbt && impl_->cbt->is_current())
+    return make_err(Err::State, "synchronous query is forbidden on callback thread");
+  CmdQuery cq;
+  cq.persisted_only = true;
   cq.id = id;
   cq.pr = std::make_shared<std::promise<Expected<TaskRecord>>>();
   auto fut = cq.pr->get_future();

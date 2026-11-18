@@ -11,7 +11,7 @@ extern "C" {
 typedef uint64_t madmedia_handle;
 typedef enum { MADMEDIA_OK=0, MADMEDIA_INVALID=1, MADMEDIA_CLOSED=2,
  MADMEDIA_BUSY=3, MADMEDIA_EMPTY=4, MADMEDIA_BUFFER_TOO_SMALL=5,
- MADMEDIA_NATIVE_ERROR=6, MADMEDIA_INTERNAL=7 } madmedia_status;
+ MADMEDIA_NATIVE_ERROR=6, MADMEDIA_INTERNAL=7, MADMEDIA_NOT_FOUND=8 } madmedia_status;
 typedef struct {
  uint32_t struct_size, abi_version;
  const char* base_url;
@@ -64,6 +64,16 @@ madmedia_status madmedia_poll(madmedia_handle,char* json,size_t capacity,size_t*
  * Repeated destroy returns CLOSED. No recovery/streaming/provider ABI in v1.
  */
 madmedia_status madmedia_destroy(madmedia_handle);
+/* Read-only journal reconciliation, on either v1 or v2 handle. No slot needed,
+ * no recovery, no receipt-mode inference. ID: 1..128 ASCII letters/digits/_/-.
+ * NOT_FOUND means no row at this read, not "never committed". IO errors return
+ * NATIVE_ERROR, allocation errors INTERNAL. Output omits paths and error text.
+ * Probe/copy are separate fresh reads: content/size may change, retry small
+ * buffers. required_bytes includes NUL; errors leave it zero. Does not consume
+ * pending events. Synchronous; use an application executor, not a UI thread.
+ */
+madmedia_status madmedia_query_persisted(madmedia_handle,const char* task_id,
+ char* json,size_t capacity,size_t* required_bytes);
 #ifdef __cplusplus
 }
 #endif

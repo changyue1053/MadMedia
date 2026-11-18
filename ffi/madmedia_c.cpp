@@ -173,6 +173,35 @@ madmedia_status madmedia_poll(madmedia_handle h,char* buffer,size_t capacity,siz
  }
  return MADMEDIA_EMPTY;
 });}
+madmedia_status madmedia_query_persisted(madmedia_handle h,const char* id,char* buffer,size_t capacity,size_t* required){return guarded([&]{
+ if(required)*required=0;
+ if(!required||!id||(!buffer&&capacity))return MADMEDIA_INVALID;
+ const size_t len=strnlen(id,129);
+ if(len==0||len>128)return MADMEDIA_INVALID;
+ for(size_t i=0;i<len;++i){unsigned char c=static_cast<unsigned char>(id[i]);
+  if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'))return MADMEDIA_INVALID;
+ }
+ auto s=lookup(h);if(!s)return MADMEDIA_CLOSED;
+ std::lock_guard<std::mutex> op(s->operations);if(s->closed)return MADMEDIA_CLOSED;
+ // Do not hold events while awaiting the scheduler: callbacks need that mutex.
+ auto result=s->engine->query_persisted(id);
+ if(!result.ok()){
+  if(result.error().code==immd::Err::NotFound)return MADMEDIA_NOT_FOUND;
+  if(result.error().code==immd::Err::Busy)return MADMEDIA_BUSY;
+  return MADMEDIA_NATIVE_ERROR;
+ }
+ const auto& r=result.value();
+ if(r.task_id!=id||r.media_id.size()>4096||static_cast<int>(r.kind)<0||static_cast<int>(r.kind)>1||
+    static_cast<int>(r.state)<0||static_cast<int>(r.state)>7)return MADMEDIA_NATIVE_ERROR;
+ auto j=immd::Json::object();
+ j.set("task_id",immd::Json::str(r.task_id));j.set("media_id",immd::Json::str(r.media_id));
+ j.set("kind",immd::Json::number(static_cast<int>(r.kind)));j.set("state",immd::Json::number(static_cast<int>(r.state)));
+ j.set("bytes_done",immd::Json::str(std::to_string(r.bytes_done)));j.set("bytes_total",immd::Json::str(std::to_string(r.size)));
+ j.set("streaming",immd::Json::boolean(r.streaming));j.set("persisted_record",immd::Json::boolean(true));
+ const auto data=j.dump();*required=data.size()+1;
+ if(!buffer||capacity<*required)return MADMEDIA_BUFFER_TOO_SMALL;
+ std::memcpy(buffer,data.c_str(),*required);return MADMEDIA_OK;
+});}
 madmedia_status madmedia_destroy(madmedia_handle h){return guarded([&]{
  std::shared_ptr<State> state;
  {std::lock_guard<std::mutex> lock(registry_mutex);auto it=registry.find(h);if(it==registry.end())return MADMEDIA_CLOSED;state=it->second;registry.erase(it);}

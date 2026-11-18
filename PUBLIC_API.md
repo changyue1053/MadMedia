@@ -23,3 +23,5 @@ On validated Linux builds, Engine holds cooperative exclusive ownership of its d
 Native `Config::journal_durability` optionally selects verified SQLite WAL/FULL; the default remains NORMAL. `ProgressEvent::journal_receipt` acknowledges only the initial task-record commit asynchronously, not source-byte persistence or completion. See [journal receipts](docs/JOURNAL_RECEIPTS.md) for delivery, failure, recovery and power-loss limits. C ABI v1 is unchanged. Rebuild C++ consumers.
 
 C consumers may opt into `madmedia_create_v2` for NORMAL/FULL configuration and a sticky initial receipt field in poll JSON. The original v1 ABI/version query/schema remain frozen. See [C ABI](docs/C_ABI.md); a consumed terminal or explicit destroy removes the receipt from this in-memory facade.
+
+Read-only reconciliation is available as native `query_persisted` and C `madmedia_query_persisted`, bypassing live task memory and without recovery/slot admission. A journal row is not proof of physical durability or original sync mode; NOT_FOUND is not proof of never submitted. C output excludes paths/error text. See [C ABI](docs/C_ABI.md).

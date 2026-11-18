@@ -68,3 +68,38 @@ coalesced progress events; first terminal pin; size/short poll preservation; and
 concurrent empty polling with synchronous destroy. Pure-C header compilation is
 included, plus a pure-C successful FULL download/cancel/terminal receipt test.
 Validated target remains Linux only, no mobile qualification claim.
+
+## Read-only persisted-record reconciliation
+
+`madmedia_query_persisted(handle, task_id, buffer, capacity, required_bytes)`
+works with v1 or v2 handles, including rows left by a previous process. It reads
+only the journal via the scheduler, not the Engine's live task map. It does not
+recover, resume, mutate the journal, consume poll events or allocate a pending
+slot. It remains usable when callback delivery has a sticky INTERNAL fault,
+so callers can still attempt reconciliation. It is synchronous and may wait
+behind accepted commands; do not use it on a UI thread.
+
+IDs must be 1..128 ASCII letters, digits, `_` or `-`; paths/URLs and longer IDs
+are rejected. SQL uses bound parameters. JSON includes only task/media IDs,
+kind/state, byte counts (decimal strings), streaming, and `persisted_record:true`.
+It excludes source/staging/destination paths, raw error strings, credentials,
+and receipt/synchronous mode. Invalid stored kind/state or media IDs over 4096
+bytes fail closed as NATIVE_ERROR.
+
+This is a fresh committed SQLite-row snapshot, **not evidence of power-safe
+storage, source-byte durability, upload completion, or the original write's
+NORMAL/FULL mode**. The current configuration cannot prove a previous mode.
+NOT_FOUND (new additive status value 8) means no row was found at that read. It
+does not establish that the task was never committed: records may be removed or
+lost under the documented storage limits. SQLite IOERR/BUSY/NOMEM return
+NATIVE_ERROR; queue admission pressure returns BUSY. C++ allocation/serialization
+exceptions return INTERNAL and leave the scheduler usable. Error text is not
+exported. `required_bytes` is zero on errors when a valid pointer is supplied.
+
+Probe and copy calls each re-read; content and required size can change between
+them. BUFFER_TOO_SMALL reports the latest required bytes without copying. Retry,
+or use a sufficiently sized caller buffer, but do not treat two calls as an
+atomic snapshot reservation. Query does not pin data or receipts. Concurrent
+close serializes with the call; later calls return CLOSED. Native
+`Engine::query_persisted` has the same synchronous callback-thread prohibition
+as `query`; the latter retains its existing live-map-first semantics.
