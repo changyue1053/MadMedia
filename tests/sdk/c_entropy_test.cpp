@@ -27,7 +27,15 @@ extern "C" ssize_t __wrap_read(int fd,void* data,size_t len){
  int n=++reads;
  if(n==1){errno=EINTR;return -1;}
  if(mode==2&&n>=3)return 0;
+ if(mode==3&&n>=3){errno=EIO;return -1;}
  size_t size=std::min<size_t>(len,3);std::memset(data,0xa5,size);return static_cast<ssize_t>(size);
+}
+// glibc fortification may rewrite read() to __read_chk at -O2.
+// Preserve the real bounds check for invalid calls, then use the same injector.
+extern "C" ssize_t __real___read_chk(int,void*,size_t,size_t);
+extern "C" ssize_t __wrap___read_chk(int fd,void* data,size_t len,size_t available){
+ if(len>available)return __real___read_chk(fd,data,len,available);
+ return __wrap_read(fd,data,len);
 }
 int main(int argc,char** argv){
  CHECK(argc==2);mode=std::atoi(argv[1]);
@@ -37,6 +45,6 @@ int main(int argc,char** argv){
  CHECK(madmedia_create(&c,&h)==MADMEDIA_OK);char id[128];
  const auto result=madmedia_upload(h,file.c_str(),"application/octet-stream",id,sizeof(id));
  if(mode==1){CHECK(result==MADMEDIA_OK);CHECK(std::string(id)=="madmedia_a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5");CHECK(reads==7);}
- else{CHECK(result==MADMEDIA_INTERNAL);CHECK(id[0]==0);size_t required=0;CHECK(madmedia_poll(h,nullptr,0,&required)==MADMEDIA_EMPTY);}
+ else{CHECK(reads==(mode==0?0:3));CHECK(result==MADMEDIA_INTERNAL);CHECK(id[0]==0);size_t required=0;CHECK(madmedia_poll(h,nullptr,0,&required)==MADMEDIA_EMPTY);}
  CHECK(madmedia_destroy(h)==MADMEDIA_OK);std::filesystem::remove_all(dir);
 }

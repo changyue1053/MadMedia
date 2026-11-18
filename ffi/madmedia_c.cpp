@@ -4,9 +4,7 @@
 #if !defined(__linux__)
 #error "MadMedia C ABI entropy provider requires target-specific implementation and validation"
 #endif
-#include <fcntl.h>
-#include <unistd.h>
-#include <cerrno>
+#include "platform/entropy.h"
 #include <stdexcept>
 #include <algorithm>
 #include <atomic>
@@ -75,17 +73,8 @@ std::string json(const immd::ProgressEvent& e) {
  return j.dump();
 }
 std::string secure_task_id() {
- unsigned char bytes[16];
- int fd=open("/dev/urandom",O_RDONLY | O_CLOEXEC);
- if(fd<0)throw std::runtime_error("entropy unavailable");
- size_t have=0;
- while(have<sizeof(bytes)) {
-  const auto n=read(fd,bytes+have,sizeof(bytes)-have);
-  if(n<0 && errno==EINTR)continue;
-  if(n<=0){close(fd);throw std::runtime_error("entropy unavailable");}
-  have+=static_cast<size_t>(n);
- }
- close(fd);
+ std::array<unsigned char,16> bytes{};
+ if(!madmedia_platform::entropy128(bytes))throw std::runtime_error("entropy unavailable");
  static const char hex[]="0123456789abcdef";
  std::string id="madmedia_";id.reserve(41);
  for(unsigned char b:bytes){id.push_back(hex[b>>4]);id.push_back(hex[b&15]);}
