@@ -1,0 +1,24 @@
+name: Android isolated capability preview
+on:
+  push:
+    branches: [checkpoint/madmedia-android-capability-preview]
+permissions:
+  contents: read
+jobs:
+  native-arm64:
+    if: github.ref == 'refs/heads/checkpoint/madmedia-android-capability-preview'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Confirm exact source checkpoint
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify fixture and proof gates
+        run: python3 android-capability-preview/test_check.py
+      - name: Select official NDK with existing runner agreements only
+        run: bash android-capability-preview/ci-ndk.sh
+      - name: Cross-link API 24 lease and API 28 entropy only
+        run: python3 android-capability-preview/check.py --ndk "$ANDROID_HOME/ndk/28.2.13676358"
