@@ -20,3 +20,15 @@ claimed.
 
 Official references: [Apple flock manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/flock.2.html)
 and [SecRandomCopyBytes](https://developer.apple.com/documentation/security/secrandomcopybytes(_:_:_:)).
+
+## Separate iOS capability gate
+
+The iOS-only checkpoint generates a native App/XCTest project from six explicit
+first-party sources in a disposable directory. Its unsigned iOS ARM64 App links
+the original Security-framework entropy provider and the shared test-only lease
+exercise. Device proof is build/link only. A distinct ARM64 iOS 26.2 simulator
+runs exactly two XCTest cases in the App host, using a newly created subtree
+of the app's own temporary directory and removing it afterward. Unsupported
+hosts and missing/mismatched SDK, runtime, architecture or test results fail
+closed. No stubs, external libraries, artifact upload, core linkage, App release,
+device execution or package/engine capability is claimed.
