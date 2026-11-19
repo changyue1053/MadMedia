@@ -1,0 +1,22 @@
+name: Apple isolated capability preview
+on:
+  push:
+    branches: [checkpoint/madmedia-apple-capability-preview]
+permissions:
+  contents: read
+jobs:
+  macos-arm64:
+    if: github.ref == 'refs/heads/checkpoint/madmedia-apple-capability-preview'
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Confirm exact source checkpoint
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Run standalone capabilities with actual Apple SDK
+        run: bash apple-capability-preview/check.sh
