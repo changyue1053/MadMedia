@@ -213,7 +213,7 @@ def verify(args,workspace):
         with args.mbedtls.open('rb') as src:
             mbed_source=curl.stage_release(src,curl.MBED,curl_area)
     with diagnostic(Stage.CURL_LINK):
-        curl.build(args,curl_area,curl_source,mbed_source)
+        curl.build(args,curl_area,curl_source,mbed_source,combined_producer_root=producer)
     with diagnostic(Stage.SQLITE_RECEIPT):
         with args.sqlite.open('rb') as src:
             sources=db.verified_sqlite(src,db.ZIP_HASH,db.C_HASH)
@@ -225,7 +225,8 @@ def verify(args,workspace):
         return curl.trace(argv,cwd,'/usr/bin:/bin',capture)
     base=[clang,'--target=aarch64-linux-android28','-std=gnu11']
     with diagnostic(Stage.SQLITE_COMPILE):
-        step(base+['-O2','-fPIC','-DSQLITE_THREADSAFE=1','-DSQLITE_OMIT_LOAD_EXTENSION=1',
+        prefix_map=curl.producer_prefix_flag(producer,sql_area)
+        step(base+[prefix_map,'-O2','-fPIC','-DSQLITE_THREADSAFE=1','-DSQLITE_OMIT_LOAD_EXTENSION=1',
                    '-c','sqlite3.c','-o','sqlite3.o'],sql_area)
     with diagnostic(Stage.SQLITE_ARCHIVE):
         step([ar,'rcs',ARCHIVES[-1],'sqlite3.o'],sql_area)

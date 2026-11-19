@@ -161,7 +161,33 @@ CURL_OFF=('CURL_USE_OPENSSL','CURL_USE_GNUTLS','CURL_USE_WOLFSSL','CURL_USE_RUST
 PROTOCOL_DISABLE=('DICT','FILE','FTP','GOPHER','IMAP','IPFS','LDAP','LDAPS','MQTT','POP3',
                   'RTSP','SMTP','TELNET','TFTP','WEBSOCKETS','DOH','PROXY','NETRC','ALTSVC','COOKIES','HSTS')
 
-def build(args,workspace,curl,mbed):
+def producer_prefix_flag(root: Path, workspace: Path) -> str:
+    """One fixed C compiler remap for a canonical combined producer parent."""
+    if not isinstance(root,Path) or not root.is_absolute() or root.name!='producers':
+        raise Rejected()
+    canonical=root.resolve(strict=True)
+    child=workspace.resolve(strict=True)
+    if (canonical!=root or child!=workspace or not canonical.is_dir() or
+        canonical not in child.parents or
+        not re.fullmatch(r'/[A-Za-z0-9_./+-]+',canonical.as_posix())):
+        raise Rejected()
+    # Keep the suffix relative and do not match an adjacent similarly named path.
+    return f'-ffile-prefix-map={canonical.as_posix()}/=./'
+
+def producer_cmake_options(workspace: Path, root: Path | None) -> list[str]:
+    if root is None:
+        return []
+    flag=producer_prefix_flag(root,workspace)
+    hook=workspace/'combined-producer-prefix-map.cmake'
+    with hook.open('x') as file:
+        file.write('if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)\n'
+                   f'  add_compile_options("$<$<COMPILE_LANGUAGE:C>:{flag}>")\n'
+                   'endif()\n')
+    # Add the C-only option after project() without replacing CMAKE_C_FLAGS
+    # or Android toolchain defaults. Nested projects inherit it once.
+    return [f'-DCMAKE_PROJECT_INCLUDE:FILEPATH={hook}']
+
+def build(args,workspace,curl,mbed,*,combined_producer_root: Path | None=None):
     ndk=args.ndk.resolve()
     cmake=args.cmake.resolve()
     ninja=args.ninja.resolve()
@@ -183,6 +209,7 @@ def build(args,workspace,curl,mbed):
             '-DFETCHCONTENT_FULLY_DISCONNECTED=ON','-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF',
             '-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF','-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY',
             '-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY',f'-DCMAKE_MAKE_PROGRAM={ninja}']
+    common+=producer_cmake_options(workspace,combined_producer_root)
     prefix=workspace/'target-deps'
     mbed_build=workspace/'mbed-build'
     run([cmake,'-S',mbed,'-B',mbed_build,'-G','Ninja',*common,

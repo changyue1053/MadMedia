@@ -3,6 +3,8 @@ from contextlib import redirect_stdout
 import io
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from verify import (ARCHIVES, BASE, Reason, Rejected, Stage, SYMBOLS, diagnostic,
                     load, package, verify_elf, verify_map, verify_relocated)
@@ -88,6 +90,77 @@ def test_elf():
         denied(lambda:verify_elf(bad,symbols))
     denied(lambda:verify_elf(elf+segments,symbols.replace(' T ',' U ')))
 
+def test_prefix_remap(curl):
+    # Capture real common configure arguments from both calls without build.
+    class StopBeforeConfigure(Exception):
+        pass
+    with tempfile.TemporaryDirectory() as path:
+        root=Path(path).resolve()
+        producer=root/'producers'
+        work=producer/'curl'
+        work.mkdir(parents=True)
+        ndk=root/'ndk'
+        tools=ndk/'toolchains/llvm/prebuilt/linux-x86_64/bin'
+        chain=ndk/'build/cmake/android.toolchain.cmake'
+        tools.mkdir(parents=True)
+        chain.parent.mkdir(parents=True)
+        (ndk/'source.properties').write_text('Pkg.Revision = 28.2.13676358\n')
+        cmake,ninja=root/'cmake',root/'ninja'
+        for path in (cmake,ninja,chain,tools/'clang',tools/'llvm-readelf',tools/'llvm-nm'):
+            path.touch()
+        cli=SimpleNamespace(ndk=ndk,cmake=cmake,ninja=ninja)
+        def captured(combined=None):
+            calls=[]
+            def trace(args,*unused):
+                if '-S' in args:
+                    calls.append(args)
+                    if len(calls)==2:
+                        raise StopBeforeConfigure()
+                if '--install' in args:
+                    output=work/'target-deps/lib'
+                    output.mkdir(parents=True,exist_ok=True)
+                    for name in ('mbedtls','mbedx509','tfpsacrypto'):
+                        (output/f'lib{name}.a').touch()
+            with patch.object(curl,'trace',side_effect=trace), redirect_stdout(io.StringIO()):
+                try:
+                    curl.build(cli,work,work/'curl-source',work/'mbed-source',
+                               combined_producer_root=combined)
+                except StopBeforeConfigure:
+                    pass
+                else:
+                    raise AssertionError('configure fixture did not stop')
+            assert len(calls)==2
+            return calls
+        standalone=captured()
+        hook=work/'combined-producer-prefix-map.cmake'
+        assert not hook.exists()
+        combined=captured(producer)
+        argument=f'-DCMAKE_PROJECT_INCLUDE:FILEPATH={hook}'
+        flag=f'-ffile-prefix-map={producer}/=./'
+        assert curl.producer_prefix_flag(producer,work)==flag
+        for old,new in zip(standalone,combined):
+            assert argument not in old and new.count(argument)==1
+            assert [x for x in new if x!=argument]==old
+        assert hook.read_text()==('if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)\n'
+                                 f'  add_compile_options("$<$<COMPILE_LANGUAGE:C>:{flag}>")\n'
+                                 'endif()\n')
+        for rejected in (str(producer),Path('producers'),root,work):
+            try:
+                curl.producer_prefix_flag(rejected,work)
+            except curl.Rejected:
+                pass
+            else:
+                raise AssertionError('invalid remap accepted')
+        other=root/'bad;flag'/'producers'
+        nested=other/'build'
+        nested.mkdir(parents=True)
+        try:
+            curl.producer_prefix_flag(other,nested)
+        except curl.Rejected:
+            pass
+        else:
+            raise AssertionError('CMake option injection accepted')
+
 def test_diagnostics():
     def outside_failure():
         # A path-looking value in an exception must never reach stdout.
@@ -122,4 +195,5 @@ if __name__=='__main__':
     test_map()
     test_elf()
     test_diagnostics()
+    test_prefix_remap(curl)
     print('PASS: synthetic artifact relocation, linker map closure and 16 KiB ELF rejection cases')
