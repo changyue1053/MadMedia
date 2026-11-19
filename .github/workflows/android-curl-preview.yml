@@ -1,0 +1,74 @@
+name: Android curl and TLS isolated dependency preview
+on:
+  push:
+    branches: [checkpoint/madmedia-android-curl-link-preview]
+permissions:
+  contents: read
+jobs:
+  curl-arm64:
+    if: github.ref == 'refs/heads/checkpoint/madmedia-android-curl-link-preview'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Confirm exact source checkpoint
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Require stock non-root runner, tools and isolated network
+        run: |
+          if [[ $(id -u) == 0 ]]; then
+            echo 'FAIL: non-root runner required'
+            exit 1
+          fi
+          if ! outside=$(/usr/bin/readlink /proc/self/ns/net 2>/dev/null) ||
+             ! inside=$(/usr/bin/timeout 10 /usr/bin/unshare --user --map-root-user --net -- /usr/bin/readlink /proc/self/ns/net 2>/dev/null) ||
+             [[ ! $outside =~ ^net:\[[0-9]+\]$ || ! $inside =~ ^net:\[[0-9]+\]$ ||
+                 $inside == "$outside" ]]; then
+            echo 'FAIL: isolated user and network namespace unavailable'
+            exit 1
+          fi
+          for tool in cmake ninja; do
+            path=$(command -v "$tool") || path=
+            if [[ $path != "/usr/bin/$tool" && $path != "/usr/local/bin/$tool" ]] ||
+               ! /usr/bin/timeout 10 "$path" --version >/dev/null 2>&1; then
+              echo 'FAIL: stock CMake or Ninja unavailable'
+              exit 1
+            fi
+          done
+          if ! sdk=$(/usr/bin/readlink -e "${ANDROID_HOME:-}" 2>/dev/null) ||
+             ! stock_sdk=$(/usr/bin/readlink -e /usr/local/lib/android/sdk 2>/dev/null) ||
+             [[ $sdk != "$stock_sdk" ]]; then
+            echo 'FAIL: stock Android SDK path unavailable'
+            exit 1
+          fi
+          if [[ -n ${ANDROID_SDK_ROOT:-} ]] &&
+             { ! sdk_root=$(/usr/bin/readlink -e "$ANDROID_SDK_ROOT" 2>/dev/null) || [[ $sdk_root != "$sdk" ]]; }; then
+            echo 'FAIL: Android SDK path disagreement'
+            exit 1
+          fi
+          echo 'PASS: stock non-root tools and independent network namespace'
+      - name: Select official NDK with existing runner agreements only
+        run: bash android-capability-preview/ci-ndk.sh
+      - name: Verify portable guard and receipt tests
+        run: |
+          python3 android-capability-preview/curl_tls/test_verify.py
+          python3 android-capability-preview/curl_tls/test_ci_fetch.py
+      - name: Prepare publisher sources, then run the disconnected target compiler gate
+        shell: bash
+        run: |
+          if ! work=$(mktemp -d 2>/dev/null); then
+            echo 'FAIL: ephemeral publisher receipt workspace'
+            exit 1
+          fi
+          trap 'rm -rf -- "$work" >/dev/null 2>&1' EXIT
+          if ! /usr/bin/timeout 100 python3 android-capability-preview/curl_tls/ci_fetch.py --dest "$work" >/dev/null 2>&1; then
+            echo 'FAIL: fixed official archive receipt'
+            exit 1
+          fi
+          echo 'PASS: fixed official archive receipts'
+          python3 android-capability-preview/curl_tls/verify.py \
+            --curl "$work/curl.tar.xz" --mbedtls "$work/mbedtls.tar.bz2" \
+            --ndk "$ANDROID_HOME/ndk/28.2.13676358" \
+            --cmake "$(command -v cmake)" --ninja "$(command -v ninja)"
