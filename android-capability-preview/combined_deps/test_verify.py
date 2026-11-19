@@ -1,0 +1,97 @@
+"""Synthetic package/map/ELF tests only; no target build or link is run."""
+from pathlib import Path
+import tempfile
+
+from verify import (ARCHIVES, BASE, Rejected, SYMBOLS, load, package,
+                    verify_elf, verify_map, verify_relocated)
+
+def denied(action):
+    try:
+        action()
+    except (Rejected,ValueError):
+        return
+    raise AssertionError('invalid synthetic input accepted')
+
+def synthetic_layout(root):
+    producer=root/'producers'
+    curl=producer/'curl'
+    sqlite=producer/'sqlite'
+    for relative in ('curl/curl.h','mbedtls/ssl.h','psa/crypto.h','tf-psa-crypto/crypto.h'):
+        dst=curl/'include'/relative
+        dst.parent.mkdir(exist_ok=True,parents=True)
+        dst.write_text('// synthetic, not a release header\n')
+    (curl/'lib').mkdir()
+    sqlite.mkdir()
+    (sqlite/'sqlite3.h').write_text('// synthetic\n')
+    for name in ARCHIVES:
+        parent=sqlite if name==ARCHIVES[-1] else curl/'lib'
+        (parent/name).write_bytes(b'!<arch>\nsynthetic nonlibrary fixture')
+    return producer,curl,sqlite
+
+def test_package():
+    with tempfile.TemporaryDirectory() as directory:
+        root=Path(directory)
+        producer,curl,sqlite=synthetic_layout(root)
+        staged=root/'original'
+        manifest=package(curl,sqlite,staged,producer)
+        relocated=root/'relocated dependency'
+        staged.rename(relocated)
+        verify_relocated(relocated,manifest,producer)
+        extra=relocated/'lib/foreign.a'
+        extra.write_bytes(b'!<arch>\nforeign')
+        denied(lambda:verify_relocated(relocated,manifest,producer))
+        extra.unlink()
+        (relocated/'empty-foreign').mkdir()
+        denied(lambda:verify_relocated(relocated,manifest,producer))
+        (relocated/'empty-foreign').rmdir()
+        (relocated/'lib'/ARCHIVES[0]).write_bytes(b'!<arch>\nmutated')
+        denied(lambda:verify_relocated(relocated,manifest,producer))
+        sqlite_header=sqlite/'sqlite3.h'
+        sqlite_header.write_text(f'#include "{producer}/private.h"')
+        denied(lambda:package(curl,sqlite,root/'absolute',producer))
+        sqlite_header.unlink()
+        sqlite_header.symlink_to(curl/'include/curl/curl.h')
+        denied(lambda:package(curl,sqlite,root/'link',producer))
+        sqlite_header.unlink()
+        sqlite_header.write_text('// synthetic')
+        (sqlite/ARCHIVES[-1]).write_bytes(b'!<thin>\nsynthetic thin archive')
+        denied(lambda:package(curl,sqlite,root/'thin',producer))
+
+def test_map():
+    paths=[f'../relocated dependency/lib/{key}' for key in ARCHIVES]
+    sdk=Path('/opt/testing-ndk')
+    def row(path):
+        return f'  1234 1234 20 4 {path}(sample.o):(.text)\n'
+    text=''.join(row(path) for path in paths)
+    text+=row(str(sdk/'toolchains/llvm/prebuilt/linux-x86_64/lib/clang/19/lib/linux/libclang_rt.builtins-aarch64-android.a'))
+    verify_map(text,paths,sdk)
+    for bad in (text.replace(row(paths[0]),''),text+row('/host/libcurl.a'),
+                text+row('/host/libssl.a'),text+row('/host/libmystery.a'),
+                text+row('/host/libunwind.a')):
+        denied(lambda:verify_map(bad,paths,sdk))
+
+def test_elf():
+    elf=(' Class: ELF64\n Type: DYN (PIE)\n Machine: AArch64\n'
+         ' [Requesting program interpreter: /system/bin/linker64]\n'
+         ' (NEEDED) Shared library: [libc.so]\n')
+    segments=(' LOAD 0x000000 0x000000 0x000000 0x1000 0x1000 R 0x4000\n'
+              ' LOAD 0x000200 0x008200 0x008200 0x2000 0x2000 R E 0x8000\n')
+    symbols='\n'.join('100 T '+name for name in SYMBOLS)
+    verify_elf(elf+segments,symbols)
+    for bad in (elf,elf+segments.replace('0x4000','0x1000'),
+                elf+segments.replace('0x8000','0x9000'),
+                elf+segments.replace('0x008200','0x008100'),
+                elf+segments+' (NEEDED) Shared library: [libsqlite3.so]\n',
+                elf+segments+' (RUNPATH) /unexpected\n'):
+        denied(lambda:verify_elf(bad,symbols))
+    denied(lambda:verify_elf(elf+segments,symbols.replace(' T ',' U ')))
+
+if __name__=='__main__':
+    curl=load('synthetic_curl_guard_import',BASE/'curl_tls/verify.py')
+    db=load('synthetic_sqlite_guard_import',BASE/'sqlite/verify.py')
+    assert curl.NDK_VERSION==db.NDK_REVISION=='28.2.13676358'
+    assert callable(curl.stage_release) and callable(curl.build) and callable(db.verified_sqlite)
+    test_package()
+    test_map()
+    test_elf()
+    print('PASS: synthetic artifact relocation, linker map closure and 16 KiB ELF rejection cases')
