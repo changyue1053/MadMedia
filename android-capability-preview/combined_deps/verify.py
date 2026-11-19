@@ -1,5 +1,7 @@
 """Nonshipping Android static dependency relocation/link check; never executes target."""
 import argparse
+from contextlib import contextmanager
+from enum import Enum
 import hashlib
 import importlib.util
 import os
@@ -18,6 +20,46 @@ SYMBOLS=('curl_easy_init','curl_easy_setopt','curl_multi_init','curl_url','mbedt
 class Rejected(Exception):
     pass
 
+class Stage(Enum):
+    TOOLCHAIN='toolchain'
+    CURL_RECEIPTS='curl-mbed-receipts'
+    CURL_LINK='curl-standalone-build-link'
+    SQLITE_RECEIPT='sqlite-receipt'
+    SQLITE_COMPILE='sqlite-compile'
+    SQLITE_ARCHIVE='sqlite-static-archive'
+    PACKAGE='artifact-package'
+    RELOCATE='artifact-relocate'
+    CONSUMER='combined-consumer-link'
+    MAP='combined-map'
+    ELF='combined-elf'
+
+class Reason(Enum):
+    ARTIFACT_TYPE='artifact-type'
+    ARTIFACT_SIZE='artifact-size'
+    PRODUCER_PATH='artifact-producer-path'
+    ARCHIVE_MAGIC='archive-magic'
+    PREFIX_LAYOUT='prefix-layout'
+    HEADER_FAMILY='header-family-missing'
+    HEADER_LAYOUT='header-layout'
+    REQUIRED_HEADER='required-header-missing'
+    RELOCATED_LAYOUT='relocated-layout'
+    RELOCATED_MANIFEST='relocated-manifest'
+
+@contextmanager
+def diagnostic(stage):
+    if not isinstance(stage,Stage):
+        raise ValueError()
+    print('START: '+stage.value,flush=True)
+    try:
+        yield
+    except Exception as error:
+        print('FAIL: '+stage.value,flush=True)
+        if (isinstance(error,Rejected) and len(error.args)==1 and
+            isinstance(error.args[0],Reason)):
+            print('CATEGORY: '+stage.value+':'+error.args[0].value,flush=True)
+        raise
+    print('PASS: '+stage.value,flush=True)
+
 def load(name,path):
     spec=importlib.util.spec_from_file_location(name,path)
     module=importlib.util.module_from_spec(spec)
@@ -27,19 +69,21 @@ def load(name,path):
 
 def artifact(path,source_root,archive):
     if path.is_symlink() or not path.is_file():
-        raise Rejected()
+        raise Rejected(Reason.ARTIFACT_TYPE)
     with path.open('rb') as file:
         data=file.read(64*1024**2+1)
-    if not data or len(data)>64*1024**2 or os.fsencode(source_root) in data:
-        raise Rejected()
+    if not data or len(data)>64*1024**2:
+        raise Rejected(Reason.ARTIFACT_SIZE)
+    if os.fsencode(source_root) in data:
+        raise Rejected(Reason.PRODUCER_PATH)
     if archive and not data.startswith(b'!<arch>\n'):
-        raise Rejected()
+        raise Rejected(Reason.ARCHIVE_MAGIC)
     return data
 
 def package(curl_prefix,sqlite_prefix,destination,producer_root):
     if any(path.is_symlink() or not path.is_dir()
            for path in (curl_prefix,curl_prefix/'include',curl_prefix/'lib',sqlite_prefix)):
-        raise Rejected()
+        raise Rejected(Reason.PREFIX_LAYOUT)
     headers=destination/'include'
     libraries=destination/'lib'
     headers.mkdir(parents=True)
@@ -53,25 +97,25 @@ def package(curl_prefix,sqlite_prefix,destination,producer_root):
     for dirname in HEADER_DIRS:
         origin=curl_prefix/'include'/dirname
         if origin.is_symlink():
-            raise Rejected()
+            raise Rejected(Reason.HEADER_LAYOUT)
         if not origin.is_dir():
             if dirname=='tf-psa-crypto':
                 continue
-            raise Rejected()
+            raise Rejected(Reason.HEADER_FAMILY)
         for src in sorted(origin.rglob('*')):
             if src.is_symlink():
-                raise Rejected()
+                raise Rejected(Reason.HEADER_LAYOUT)
             if src.is_dir():
                 continue
             relative=src.relative_to(origin)
             if len(manifest)>=5000 or not re.fullmatch(r'[A-Za-z0-9_./+-]+\.h',relative.as_posix()):
-                raise Rejected()
+                raise Rejected(Reason.HEADER_LAYOUT)
             dst=headers/dirname/relative
             dst.parent.mkdir(parents=True,exist_ok=True)
             copy(src,dst)
     required=('curl/curl.h','mbedtls/ssl.h','psa/crypto.h')
     if any('include/'+key not in manifest for key in required):
-        raise Rejected()
+        raise Rejected(Reason.REQUIRED_HEADER)
     copy(sqlite_prefix/'sqlite3.h',headers/'sqlite3.h')
     for name in ARCHIVES:
         source=sqlite_prefix if name==ARCHIVES[-1] else curl_prefix/'lib'
@@ -83,23 +127,23 @@ def verify_relocated(sdk,manifest,producer_root):
     expected_dirs={parent.as_posix() for artifact_name in manifest
                    for parent in Path(artifact_name).parents}
     if sdk.is_symlink() or not sdk.is_dir():
-        raise Rejected()
+        raise Rejected(Reason.RELOCATED_LAYOUT)
     for path in sdk.rglob('*'):
         if path.is_symlink():
-            raise Rejected()
+            raise Rejected(Reason.RELOCATED_LAYOUT)
         relative=path.relative_to(sdk).as_posix()
         if path.is_dir():
             if relative not in expected_dirs:
-                raise Rejected()
+                raise Rejected(Reason.RELOCATED_LAYOUT)
             continue
         if relative not in manifest:
-            raise Rejected()
+            raise Rejected(Reason.RELOCATED_MANIFEST)
         data=artifact(path,producer_root,relative.startswith('lib/'))
         if hashlib.sha256(data).hexdigest()!=manifest[relative]:
-            raise Rejected()
+            raise Rejected(Reason.RELOCATED_MANIFEST)
         observed.add(relative)
     if observed!=set(manifest):
-        raise Rejected()
+        raise Rejected(Reason.RELOCATED_MANIFEST)
 
 def verify_map(report,relative_archives,ndk_root):
     # LLD map input rows have an archive(member):section operand. Require
@@ -155,54 +199,65 @@ def verify_elf(report,symbols):
         raise Rejected()
 
 def verify(args,workspace):
-    curl=load('madmedia_curl_receipts',BASE/'curl_tls/verify.py')
-    db=load('madmedia_sqlite_receipts',BASE/'sqlite/verify.py')
-    clang,ar,readelf,nm=db.toolchain(args.ndk.resolve())
-    producer=workspace/'producers'
-    producer.mkdir()
-    curl_area=producer/'curl'
-    curl_area.mkdir()
-    with args.curl.open('rb') as src:
-        curl_source=curl.stage_release(src,curl.CURL,curl_area)
-    with args.mbedtls.open('rb') as src:
-        mbed_source=curl.stage_release(src,curl.MBED,curl_area)
-    curl.build(args,curl_area,curl_source,mbed_source)
-    with args.sqlite.open('rb') as src:
-        sources=db.verified_sqlite(src,db.ZIP_HASH,db.C_HASH)
-    sql_area=producer/'sqlite'
-    sql_area.mkdir()
-    for name,data in sources.items():
-        (sql_area/name).write_bytes(data)
+    with diagnostic(Stage.TOOLCHAIN):
+        curl=load('madmedia_curl_receipts',BASE/'curl_tls/verify.py')
+        db=load('madmedia_sqlite_receipts',BASE/'sqlite/verify.py')
+        clang,ar,readelf,nm=db.toolchain(args.ndk.resolve())
+        producer=workspace/'producers'
+        producer.mkdir()
+        curl_area=producer/'curl'
+        curl_area.mkdir()
+    with diagnostic(Stage.CURL_RECEIPTS):
+        with args.curl.open('rb') as src:
+            curl_source=curl.stage_release(src,curl.CURL,curl_area)
+        with args.mbedtls.open('rb') as src:
+            mbed_source=curl.stage_release(src,curl.MBED,curl_area)
+    with diagnostic(Stage.CURL_LINK):
+        curl.build(args,curl_area,curl_source,mbed_source)
+    with diagnostic(Stage.SQLITE_RECEIPT):
+        with args.sqlite.open('rb') as src:
+            sources=db.verified_sqlite(src,db.ZIP_HASH,db.C_HASH)
+        sql_area=producer/'sqlite'
+        sql_area.mkdir()
+        for name,data in sources.items():
+            (sql_area/name).write_bytes(data)
     def step(argv,cwd,capture=False):
         return curl.trace(argv,cwd,'/usr/bin:/bin',capture)
     base=[clang,'--target=aarch64-linux-android28','-std=gnu11']
-    step(base+['-O2','-fPIC','-DSQLITE_THREADSAFE=1','-DSQLITE_OMIT_LOAD_EXTENSION=1',
-               '-c','sqlite3.c','-o','sqlite3.o'],sql_area)
-    step([ar,'rcs',ARCHIVES[-1],'sqlite3.o'],sql_area)
+    with diagnostic(Stage.SQLITE_COMPILE):
+        step(base+['-O2','-fPIC','-DSQLITE_THREADSAFE=1','-DSQLITE_OMIT_LOAD_EXTENSION=1',
+                   '-c','sqlite3.c','-o','sqlite3.o'],sql_area)
+    with diagnostic(Stage.SQLITE_ARCHIVE):
+        step([ar,'rcs',ARCHIVES[-1],'sqlite3.o'],sql_area)
     initial=workspace/'staged'
-    manifest=package(curl_area/'target-deps',sql_area,initial,producer)
-    relocated=workspace/'relocated dependency'
-    initial.rename(relocated)
-    shutil.rmtree(producer)
-    if initial.exists() or producer.exists():
-        raise Rejected()
-    verify_relocated(relocated,manifest,producer)
+    with diagnostic(Stage.PACKAGE):
+        manifest=package(curl_area/'target-deps',sql_area,initial,producer)
+    with diagnostic(Stage.RELOCATE):
+        relocated=workspace/'relocated dependency'
+        initial.rename(relocated)
+        shutil.rmtree(producer)
+        if initial.exists() or producer.exists():
+            raise Rejected(Reason.RELOCATED_LAYOUT)
+        verify_relocated(relocated,manifest,producer)
     print('PASS: independently verified dependency families staged and relocated',flush=True)
-    consumer=workspace/'independent consumer'
-    consumer.mkdir()
-    shutil.copyfile(Path(__file__).with_name('consumer.c'),consumer/'consumer.c')
-    archives=[f'../relocated dependency/lib/{name}' for name in ARCHIVES]
-    step(base+['-Wall','-Wextra','-Werror','-fPIE','-pie','-Wl,--no-undefined',
-               '-Wl,-z,max-page-size=16384','-Wl,-z,common-page-size=16384',
-               '-Wl,-Map=consumer.map','-I../relocated dependency/include',
-               'consumer.c',*archives,'-lm','-o','consumer'],consumer)
-    with (consumer/'consumer.map').open('r') as file:
-        report=file.read(16*1024**2+1)
-    if len(report)>16*1024**2 or str(producer) in report:
-        raise Rejected()
-    verify_map(report,archives,args.ndk.resolve())
-    verify_elf(step([readelf,'-h','-l','-d','-W','consumer'],consumer,True),
-               step([nm,'--defined-only','consumer'],consumer,True))
+    with diagnostic(Stage.CONSUMER):
+        consumer=workspace/'independent consumer'
+        consumer.mkdir()
+        shutil.copyfile(Path(__file__).with_name('consumer.c'),consumer/'consumer.c')
+        archives=[f'../relocated dependency/lib/{name}' for name in ARCHIVES]
+        step(base+['-Wall','-Wextra','-Werror','-fPIE','-pie','-Wl,--no-undefined',
+                   '-Wl,-z,max-page-size=16384','-Wl,-z,common-page-size=16384',
+                   '-Wl,-Map=consumer.map','-I../relocated dependency/include',
+                   'consumer.c',*archives,'-lm','-o','consumer'],consumer)
+    with diagnostic(Stage.MAP):
+        with (consumer/'consumer.map').open('r') as file:
+            report=file.read(16*1024**2+1)
+        if len(report)>16*1024**2 or str(producer) in report:
+            raise Rejected()
+        verify_map(report,archives,args.ndk.resolve())
+    with diagnostic(Stage.ELF):
+        verify_elf(step([readelf,'-h','-l','-d','-W','consumer'],consumer,True),
+                   step([nm,'--defined-only','consumer'],consumer,True))
 
 def main():
     parser=argparse.ArgumentParser()

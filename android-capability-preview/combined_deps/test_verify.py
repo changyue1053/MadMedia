@@ -1,9 +1,11 @@
 """Synthetic package/map/ELF tests only; no target build or link is run."""
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 import tempfile
 
-from verify import (ARCHIVES, BASE, Rejected, SYMBOLS, load, package,
-                    verify_elf, verify_map, verify_relocated)
+from verify import (ARCHIVES, BASE, Reason, Rejected, Stage, SYMBOLS, diagnostic,
+                    load, package, verify_elf, verify_map, verify_relocated)
 
 def denied(action):
     try:
@@ -86,6 +88,31 @@ def test_elf():
         denied(lambda:verify_elf(bad,symbols))
     denied(lambda:verify_elf(elf+segments,symbols.replace(' T ',' U ')))
 
+def test_diagnostics():
+    def outside_failure():
+        # A path-looking value in an exception must never reach stdout.
+        raise OSError('/internal/synthetic/private-path')
+    out=io.StringIO()
+    with redirect_stdout(out):
+        try:
+            with diagnostic(Stage.CURL_LINK):
+                outside_failure()
+        except OSError:
+            pass
+        try:
+            with diagnostic(Stage.PACKAGE):
+                raise Rejected(Reason.PRODUCER_PATH)
+        except Rejected:
+            pass
+        with diagnostic(Stage.RELOCATE):
+            pass
+        denied(lambda:diagnostic('/internal/synthetic').__enter__())
+    assert out.getvalue().splitlines()==[
+        'START: curl-standalone-build-link','FAIL: curl-standalone-build-link',
+        'START: artifact-package','FAIL: artifact-package',
+        'CATEGORY: artifact-package:artifact-producer-path',
+        'START: artifact-relocate','PASS: artifact-relocate']
+
 if __name__=='__main__':
     curl=load('synthetic_curl_guard_import',BASE/'curl_tls/verify.py')
     db=load('synthetic_sqlite_guard_import',BASE/'sqlite/verify.py')
@@ -94,4 +121,5 @@ if __name__=='__main__':
     test_package()
     test_map()
     test_elf()
+    test_diagnostics()
     print('PASS: synthetic artifact relocation, linker map closure and 16 KiB ELF rejection cases')
