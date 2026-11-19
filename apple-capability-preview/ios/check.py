@@ -15,6 +15,49 @@ STAGES = {'xcode', 'sdk-simulator', 'sdk-device', 'device-build', 'device-arch',
           'sim-create', 'sim-boot', 'sim-ready', 'sim-build', 'sim-arch',
           'sim-test', 'summary', 'test-tree', 'sim-delete'}
 
+XCODE_STAGES = {'device-build', 'sim-build', 'sim-test'}
+DIAGNOSTIC_LIMIT = 256 * 1024
+# Order denotes cause specificity. Never return matched substrings or command text.
+DIAGNOSTICS = {
+    'missing-input': (r'(?:error|fatal error): [^\n]*(?:file not found|no such file or directory|build input files? cannot be found)',),
+    'missing-module': (r'(?:error|fatal error): [^\n]*(?:no such module|could not build module|module [^\n]+ not found|missing required module)',),
+    'platform': (r'(?:error|fatal error): [^\n]*(?:unable to find a destination|no destinations|sdk [^\n]+ cannot be located|deployment target|not available on ios)',
+                 r'building for [^\n]+ but (?:linking in|built for)'),
+    'signing': (r'(?:error|fatal error): [^\n]*(?:provisioning profiles?|signing certificate|code signing|requires a development team|codesign)',
+                r'command codesign failed'),
+    'link': (r'undefined symbols? for architecture|duplicate symbol|ld: (?:framework|library) [^\n]+ not found',
+             r'linker command failed|command ld failed'),
+    'compile': (r'command (?:compilec|swiftcompile) failed',
+                r':\d+:\d+: (?:fatal )?error:'),
+    'project': (r'(?:error|fatal error): [^\n]*(?:project is damaged|unable to read project|cannot open|invalid project|pif transfer)',
+                r'failed to load project'),
+    'test-runner': (r'(?:error|fatal error): [^\n]*(?:failed to launch|test runner|failed to prepare device)',),
+}
+
+def xcode_category(log):
+    # Bound both byte reads and decoding regardless of Xcode output size.
+    half = DIAGNOSTIC_LIMIT // 2
+    end = log.seek(0,2)
+    log.seek(0)
+    head = log.read(half)
+    log.seek(max(len(head),end-half))
+    tail = log.read(half)
+    message = (head+b'\n'+tail).decode('utf-8',errors='replace').lower()
+    for label, patterns in DIAGNOSTICS.items():
+        if any(re.search(pattern,message,re.MULTILINE) for pattern in patterns):
+            return label
+    # An ordinary transcript contains successful CompileC/Ld commands too.
+    # Consult command verbs only inside Xcode's explicit failure summary.
+    summary = message.rsplit('the following build commands failed:',1)
+    if len(summary)==2:
+        candidates = {'compile':r'^[ \t]*(?:compilec|swiftcompile)\s',
+                      'link':r'^[ \t]*ld\s',
+                      'signing':r'^[ \t]*codesign\s'}
+        for label, pattern in candidates.items():
+            if re.search(pattern,summary[1],re.MULTILINE):
+                return label
+    return 'unclassified'
+
 def run(stage, args, cwd=None, capture=False, timeout=420):
     if stage not in STAGES:
         raise ValueError()
@@ -22,7 +65,8 @@ def run(stage, args, cwd=None, capture=False, timeout=420):
     with tempfile.TemporaryFile() as log:
         try:
             subprocess.run([str(arg) for arg in args], cwd=cwd, stdin=subprocess.DEVNULL,
-                           stdout=log, stderr=subprocess.DEVNULL, check=True, timeout=timeout)
+                           stdout=log, stderr=(subprocess.STDOUT if stage in XCODE_STAGES else subprocess.DEVNULL),
+                           check=True, timeout=timeout)
             if capture:
                 log.seek(0)
                 value = log.read(262145)
@@ -31,8 +75,16 @@ def run(stage, args, cwd=None, capture=False, timeout=420):
                 result = value.decode('utf-8').strip()
             else:
                 result = None
-        except Exception:
+        except Exception as error:
             print('FAIL: '+stage, flush=True)
+            if stage in XCODE_STAGES:
+                if isinstance(error,subprocess.TimeoutExpired):
+                    label = 'timeout'
+                elif isinstance(error,OSError):
+                    label = 'launch'
+                else:
+                    label = xcode_category(log)
+                print('CATEGORY: '+stage+':'+label, flush=True)
             raise
     print('PASS: '+stage, flush=True)
     return result
