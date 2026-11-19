@@ -64,10 +64,15 @@ def stage_release(handle, spec, workspace):
                 raise Rejected()
             name=member.name
             path=PurePosixPath(name)
+            portable=all(re.fullmatch(r'[A-Za-z0-9._+@-]{1,160}',part) and part not in ('.','..')
+                         for part in path.parts)
+            # This exact regular Autotools member is in curl's official archive.
+            # Do not widen the character policy for any other package or path.
+            curl_obsolete=(spec.root==CURL.root and
+                           name=='curl-8.23.0/m4/lt~obsolete.m4' and member.isfile())
             if (path.is_absolute() or not path.parts or path.parts[0]!=spec.root or
                 name!=path.as_posix() or name in names or
-                any(not re.fullmatch(r'[A-Za-z0-9._+@-]{1,160}',part) or part in ('.','..')
-                    for part in path.parts) or len(path.parts)>24 or member.issparse() or
+                not (portable or curl_obsolete) or len(path.parts)>24 or member.issparse() or
                 member.size<0 or member.size>MEMBER_LIMIT or
                 member.mode & (stat.S_ISUID | stat.S_ISGID) or
                 not (member.isfile() or member.isdir())):

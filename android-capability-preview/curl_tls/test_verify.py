@@ -34,20 +34,27 @@ def verify_tar(data,workspace):
     return stage_release(io.BytesIO(data),synthetic,workspace)
 
 def test_archive():
-    valid=packed()
+    valid=packed(entries=[('m4/lt~obsolete.m4',b'synthetic')])
     with tempfile.TemporaryDirectory() as temporary:
         root=Path(temporary)
         final=verify_tar(valid,root)
         assert (final/'COPYING').read_bytes()==b'synthetic'
+        assert (final/'m4/lt~obsolete.m4').read_bytes()==b'synthetic'
         assert_rejected(lambda: stage_release(io.BytesIO(valid),CURL,root))
     fixtures=[valid+b'junk',packed(version=b'8.3.0'),packed(entries=[('../outside',b'x')]),
               packed(entries=[('/aliased',b'x')]),packed(entries=[('COPYING',b'duplicate')]),
+              packed(entries=[('m4/other~name.m4',b'x')]),
+              packed(entries=[('sub/m4/lt~obsolete.m4',b'x')]),
               packed(entries=[('parent',b'file'),('parent/child',b'nested')])]
     for type_ in (tarfile.SYMTYPE,tarfile.LNKTYPE,tarfile.FIFOTYPE):
         info=tarfile.TarInfo(CURL.root+'/special')
         info.type=type_
         info.linkname='COPYING'
         fixtures.append(packed(entries=[(info,b'')]))
+    link=tarfile.TarInfo(CURL.root+'/m4/lt~obsolete.m4')
+    link.type=tarfile.SYMTYPE
+    link.linkname='COPYING'
+    fixtures.append(packed(entries=[(link,b'')]))
     for payload in fixtures:
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
