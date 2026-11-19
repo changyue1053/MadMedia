@@ -1,0 +1,88 @@
+name: Linux host curl loopback TLS preview
+on:
+  push:
+    branches: [checkpoint/madmedia-linux-curl-loopback-preview]
+permissions:
+  contents: read
+jobs:
+  host-loopback:
+    if: github.ref == 'refs/heads/checkpoint/madmedia-linux-curl-loopback-preview'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Confirm exact source checkpoint
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Require stock non-root tools and separate namespaces
+        run: |
+          if [[ $(id -u) == 0 ]]; then
+            echo 'FAIL: non-root Linux host required'
+            exit 1
+          fi
+          for tool in cmake ninja; do
+            path=$(command -v "$tool") || path=
+            if [[ $path != "/usr/bin/$tool" && $path != "/usr/local/bin/$tool" ]] ||
+               ! /usr/bin/timeout 10 "$path" --version >/dev/null 2>&1; then
+              echo 'FAIL: stock CMake or Ninja unavailable'
+              exit 1
+            fi
+          done
+          for path in /usr/bin/cc /usr/bin/readelf /usr/bin/nm /usr/bin/openssl /usr/bin/unshare; do
+            if [[ ! -x $path ]]; then
+              echo 'FAIL: stock Linux host tools unavailable'
+              exit 1
+            fi
+          done
+          if [[ ! -x /usr/sbin/ip && ! -x /usr/bin/ip ]] ||
+             ! python3 -c 'import ssl; assert ssl.HAS_TLSv1_2' >/dev/null 2>&1; then
+            echo 'FAIL: stock iproute2 or Python SSL unavailable'
+            exit 1
+          fi
+          for ns in user net; do
+            if ! outer=$(/usr/bin/readlink "/proc/self/ns/$ns" 2>/dev/null) ||
+               ! inner=$(/usr/bin/timeout 10 /usr/bin/unshare --user --map-root-user --net -- /usr/bin/readlink "/proc/self/ns/$ns" 2>/dev/null) ||
+               [[ ! $outer =~ ^${ns}:\[[0-9]+\]$ || ! $inner =~ ^${ns}:\[[0-9]+\]$ || $inner == "$outer" ]]; then
+              echo 'FAIL: required independent user and network namespaces unavailable'
+              exit 1
+            fi
+          done
+          echo 'PASS: stock host tools and separate namespaces; loopback usability not yet proven'
+      - name: Run portable policy and receipt checks
+        run: |
+          python3 android-capability-preview/curl_tls/test_ci_fetch.py
+          python3 android-capability-preview/curl_tls/host/test_host.py
+      - name: Prepare fixed official publisher receipts only
+        id: receipt
+        shell: bash
+        run: |
+          work="${RUNNER_TEMP:?}/madmedia-linux-curl-proof-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+          if ! mkdir -m 700 -- "$work" >/dev/null 2>&1; then
+            echo 'FAIL: ephemeral publisher receipt workspace'
+            exit 1
+          fi
+          trap 'rm -rf -- "$work" >/dev/null 2>&1' EXIT
+          if ! /usr/bin/timeout 100 python3 android-capability-preview/curl_tls/ci_fetch.py --dest "$work" >/dev/null 2>&1; then
+            echo 'FAIL: fixed official archive receipt'
+            exit 1
+          fi
+          trap - EXIT
+          echo 'PASS: fixed official archive receipts'
+      - name: Build disconnected and require strict Linux-only loopback proofs
+        shell: bash
+        run: |
+          work="${RUNNER_TEMP:?}/madmedia-linux-curl-proof-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+          python3 android-capability-preview/curl_tls/host/run_host.py \
+            --curl "$work/curl.tar.xz" --mbedtls "$work/mbedtls.tar.bz2" \
+            --cmake "$(command -v cmake)" --ninja "$(command -v ninja)"
+      - name: Remove ephemeral publisher receipts
+        if: always() && steps.receipt.outcome == 'success'
+        shell: bash
+        run: |
+          work="${RUNNER_TEMP:?}/madmedia-linux-curl-proof-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+          if ! rm -rf -- "$work" >/dev/null 2>&1; then
+            echo 'FAIL: publisher receipt cleanup'
+            exit 1
+          fi
