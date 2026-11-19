@@ -112,6 +112,28 @@ def verify(summary, tests):
     if found!=CASES:
         raise ValueError()
 
+STAGED_SOURCES = ('apple-capability-preview/ios/App.mm',
+                  'apple-capability-preview/ios/Tests.mm',
+                  'apple-capability-preview/lease_fixture.h',
+                  'apple-capability-preview/lease.cpp',
+                  'core/platform/entropy.h',
+                  'ffi/platform/entropy_apple.cpp')
+
+def verify_local_includes(app):
+    # This preview uses a fixed, flat source set. All quoted includes must
+    # name an explicitly staged peer; SDK angle-bracket includes are separate.
+    names = {Path(source).name for source in STAGED_SOURCES}
+    for name in names:
+        content = (app/name).read_text()
+        for quoted in re.findall(r'^\s*#\s*(?:include|import)\s*"([^"\n]+)"', content, re.MULTILINE):
+            if quoted not in names or not (app/quoted).is_file():
+                raise ValueError()
+
+def stage_sources(root, app):
+    for source in STAGED_SOURCES:
+        shutil.copyfile(root/source,app/Path(source).name)
+    verify_local_includes(app)
+
 def main():
     if platform.system()!='Darwin' or platform.machine()!='arm64':
         raise ValueError()
@@ -125,10 +147,7 @@ def main():
         temporary = Path(work)
         app = temporary/'independent preview'
         app.mkdir()
-        for relative in ('apple-capability-preview/ios/App.mm','apple-capability-preview/ios/Tests.mm',
-                         'apple-capability-preview/lease_fixture.h','apple-capability-preview/lease.cpp',
-                         'ffi/platform/entropy.h','ffi/platform/entropy_apple.cpp'):
-            shutil.copyfile(root/relative,app/Path(relative).name)
+        stage_sources(root,app)
         project(app)
         base = ['-project','Preview.xcodeproj','-configuration','Debug','ARCHS=arm64',
                 'ONLY_ACTIVE_ARCH=YES']

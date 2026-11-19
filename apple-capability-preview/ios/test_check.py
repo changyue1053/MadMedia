@@ -9,7 +9,8 @@ import tempfile
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
-from check import CASES, DIAGNOSTIC_LIMIT, run, verify, xcode_category
+from check import (CASES, DIAGNOSTIC_LIMIT, run, stage_sources, verify,
+                   verify_local_includes, xcode_category)
 from project import project
 
 SUMMARY = dict(totalTestCount=2,passedTests=2,failedTests=0,skippedTests=0)
@@ -72,7 +73,23 @@ def main():
     tree['testNodes'][0]['nodeIdentifier']='unexpected'
     rejected(SUMMARY,tree)
     with tempfile.TemporaryDirectory() as path:
-        project(Path(path))
+        root = Path(__file__).resolve().parents[2]
+        app = Path(path)
+        stage_sources(root,app)
+        canonical = (root/'core/platform/entropy.h').read_bytes()
+        assert (app/'entropy.h').read_bytes()==canonical
+        assert (app/'entropy_apple.cpp').read_bytes()==(root/'ffi/platform/entropy_apple.cpp').read_bytes()
+        # Regression: the forwarding header cannot resolve from a flat copy.
+        staged = app/'entropy.h'
+        staged.write_bytes((root/'ffi/platform/entropy.h').read_bytes())
+        try:
+            verify_local_includes(app)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('escaping source include accepted')
+        staged.write_bytes(canonical)
+        project(app)
         pbx = (Path(path)/'Preview.xcodeproj/project.pbxproj').read_text()
         scheme = ET.parse(Path(path)/'Preview.xcodeproj/xcshareddata/xcschemes/Preview.xcscheme')
         assert (('entropy_apple.cpp' in pbx) and ('"Security"' in pbx) and
