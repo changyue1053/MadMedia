@@ -1,0 +1,38 @@
+name: Android SQLite isolated dependency preview
+on:
+  push:
+    branches: [checkpoint/madmedia-android-sqlite-preview]
+permissions:
+  contents: read
+jobs:
+  sqlite-arm64:
+    if: github.ref == 'refs/heads/checkpoint/madmedia-android-sqlite-preview'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Confirm exact source checkpoint
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify portable checker and receipt gates
+        run: |
+          python3 android-capability-preview/sqlite/test_verify.py
+          python3 android-capability-preview/sqlite/test_ci_fetch.py
+      - name: Select official NDK with existing runner agreements only
+        run: bash android-capability-preview/ci-ndk.sh
+      - name: Verify fixed official SQLite archive, then cross-link offline
+        shell: bash
+        run: |
+          if ! work=$(mktemp -d 2>/dev/null); then
+            echo 'FAIL: ephemeral-source-workspace'
+            exit 1
+          fi
+          trap 'rm -rf -- "$work" >/dev/null 2>&1' EXIT
+          if ! timeout 60 python3 android-capability-preview/sqlite/ci_fetch.py "$work/archive.zip" >/dev/null 2>&1; then
+            echo 'FAIL: fixed SQLite publisher receipt'
+            exit 1
+          fi
+          echo 'PASS: fixed SQLite publisher receipt'
+          python3 android-capability-preview/sqlite/verify.py --archive "$work/archive.zip" --ndk "$ANDROID_HOME/ndk/28.2.13676358"
