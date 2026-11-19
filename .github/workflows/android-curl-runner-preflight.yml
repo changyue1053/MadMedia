@@ -7,7 +7,7 @@ permissions:
 jobs:
   observer:
     if: github.ref == 'refs/heads/checkpoint/madmedia-android-curl-runner-preflight'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 4
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -26,6 +26,11 @@ jobs:
             exit 1
           fi
           echo 'PASS: non-root runner'
+          if ! /usr/bin/grep -Fxq 'VERSION_ID="22.04"' /etc/os-release; then
+            echo 'FAIL: unexpected runner OS version'
+            exit 1
+          fi
+          echo 'PASS: Ubuntu 22.04 runner'
 
           if [[ -x /usr/bin/unshare ]] &&
              outside=$(/usr/bin/readlink /proc/self/ns/net 2>/dev/null) &&
@@ -47,20 +52,20 @@ jobs:
             status=1
           fi
 
-          if [[ -x /usr/bin/cmake ]] &&
-             cmake_version=$(/usr/bin/timeout 10 /usr/bin/cmake --version 2>/dev/null) &&
+          if cmake_path=$(type -P cmake) && [[ $cmake_path == /* && -x $cmake_path ]] &&
+             cmake_version=$(/usr/bin/timeout 10 "$cmake_path" --version 2>/dev/null) &&
              [[ ${cmake_version%%$'\n'*} =~ ^cmake\ version\ [0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo 'PASS: system CMake path and version available'
+            echo 'PASS: runner CMake path and version available'
           else
-            echo 'FAIL: system CMake path or version unavailable'
+            echo 'FAIL: runner CMake path or version unavailable'
             status=1
           fi
-          if [[ -x /usr/bin/ninja ]] &&
-             ninja_version=$(/usr/bin/timeout 10 /usr/bin/ninja --version 2>/dev/null) &&
+          if ninja_path=$(type -P ninja) && [[ $ninja_path == /* && -x $ninja_path ]] &&
+             ninja_version=$(/usr/bin/timeout 10 "$ninja_path" --version 2>/dev/null) &&
              [[ $ninja_version =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-            echo 'PASS: system Ninja path and version available'
+            echo 'PASS: runner Ninja path and version available'
           else
-            echo 'FAIL: system Ninja path or version unavailable'
+            echo 'FAIL: runner Ninja path or version unavailable'
             status=1
           fi
           echo 'OBSERVATION ONLY: no dependency build, install, or Android runtime'
