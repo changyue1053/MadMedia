@@ -180,6 +180,51 @@ class Tests(unittest.TestCase):
         for unseeded in ('GPS','Exif','IPTC'):
             self.assertNotIn(f'kCGImageProperty{unseeded}Dictionary',fixture)
 
+    def test_partial_owned_result_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            owner=Path(tmp).resolve()
+            result=owner/'result.xcresult'
+            other=owner/'unrelated.xcresult';other.mkdir()
+            self.assertFalse(check.owned_result(owner))
+            result.symlink_to(other,target_is_directory=True)
+            self.assertFalse(check.owned_result(owner))
+            result.unlink();result.touch()
+            self.assertFalse(check.owned_result(owner))
+            result.unlink();result.mkdir()
+            self.assertTrue(check.owned_result(owner))
+            alias=owner/'alias';alias.symlink_to(owner,target_is_directory=True)
+            self.assertFalse(check.owned_result(alias))
+            with patch.object(check,'partial_json') as reader,contextlib.redirect_stdout(io.StringIO()) as out:
+                check.report_partial(alias)
+            reader.assert_not_called()
+            self.assertEqual(out.getvalue(),'RESULT: sim-test-partial:unsafe\n')
+
+    def test_partial_reads_and_labels(self):
+        summary=dict(totalTestCount=2,passedTests=1,failedTests=1,skippedTests=0)
+        first,second=check.CASE_LABELS
+        def node(name,outcome):return dict(nodeType='Test Case',nodeIdentifier=name,result=outcome)
+        cases=[node(first+'()','Passed'),node(second,'Failed')]
+        self.assertEqual(check.partial_outcomes(summary,{'testNodes':cases}),[('roundtrip','passed'),('bounds','failed')])
+        self.assertEqual(check.partial_outcomes(summary,{'testNodes':[node(second,'Skipped')]}),[('roundtrip','absent'),('bounds','skipped')])
+        for malformed in ([node(first,'private')],[node('unexpected/path','Passed')],
+                          [node(first,'Passed'),node(first+'()','Passed')],['broken']):
+            with self.assertRaises(ValueError):check.partial_outcomes(summary,{'testNodes':malformed})
+        with self.assertRaises(ValueError):check.partial_outcomes({}, {'testNodes':cases})
+        with tempfile.TemporaryDirectory() as tmp:
+            owner=Path(tmp).resolve();(owner/'result.xcresult').mkdir()
+            with patch.object(check,'partial_json',side_effect=[summary,{'testNodes':cases}]),contextlib.redirect_stdout(io.StringIO()) as out:
+                check.report_partial(owner)
+            self.assertEqual(out.getvalue(),'RESULT: sim-test-partial:available\nRESULT: sim-test-case:roundtrip:passed\nRESULT: sim-test-case:bounds:failed\n')
+
+    def test_partial_json_is_bounded_and_object_only(self):
+        for payload,good in ((b'{"testNodes":[]}',True),(b'[' ,False),(b'[]',False),
+                             (b' '*check.PARTIAL_LIMIT+b'{}',False)):
+            def command(*args,**kw):kw['stdout'].write(payload)
+            with patch.object(check.subprocess,'run',side_effect=command):
+                if good:self.assertEqual(check.partial_json(Path('fixture'),'tests'),{'testNodes':[]})
+                else:
+                    with self.assertRaises(ValueError):check.partial_json(Path('fixture'),'tests')
+
     def test_branch_scope(self):
         workflow=(check.ROOT/'.github/workflows/ios-image-preview.yml').read_text()
         self.assertIn('branches: [checkpoint/madmedia-ios-image-preview]',workflow)

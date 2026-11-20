@@ -226,6 +226,70 @@ def preflight_runtime():
     verify_runtime(document)
 
 
+PARTIAL_LIMIT=256*1024
+CASE_LABELS={
+    'PreviewTests/testInstalledImageRoundTrip':'roundtrip',
+    'PreviewTests/testInstalledImageBoundsAndCapacity':'bounds',
+}
+PARTIAL_OUTCOMES={'Passed':'passed','Failed':'failed','Skipped':'skipped'}
+
+def owned_result(work):
+    result=work/'result.xcresult'
+    return (not work.is_symlink() and work.is_dir() and work.resolve()==work and
+            not result.is_symlink() and result.is_dir() and result.resolve()==result)
+
+def partial_json(result,key):
+    if key not in ('summary','tests'):raise ValueError()
+    with tempfile.TemporaryFile() as log:
+        subprocess.run(['xcrun','xcresulttool','get','test-results',key,'--path',result,'--compact'],
+                       stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.DEVNULL,
+                       timeout=30,check=True)
+        log.seek(0)
+        data=log.read(PARTIAL_LIMIT+1)
+    if len(data)>PARTIAL_LIMIT:raise ValueError()
+    doc=json.loads(data)
+    if not isinstance(doc,dict):raise ValueError()
+    return doc
+
+def partial_outcomes(summary,tree):
+    keys=('totalTestCount','passedTests','failedTests','skippedTests')
+    if any(type(summary.get(k)) is not int or not 0<=summary[k]<=100 for k in keys):
+        raise ValueError()
+    found={}
+    pending=[tree.get('testNodes')]
+    while pending:
+        nodes=pending.pop()
+        if not isinstance(nodes,list):raise ValueError()
+        for node in nodes:
+            if not isinstance(node,dict):raise ValueError()
+            if node.get('nodeType')=='Test Case':
+                name=node.get('nodeIdentifier')
+                outcome=node.get('result')
+                if not isinstance(name,str) or not isinstance(outcome,str):raise ValueError()
+                name=name.removesuffix('()')
+                if name not in CASE_LABELS or name in found or outcome not in PARTIAL_OUTCOMES:raise ValueError()
+                found[name]=PARTIAL_OUTCOMES[outcome]
+            pending.append(node.get('children',[]))
+    return [(label,found.get(name,'absent')) for name,label in CASE_LABELS.items()]
+
+def report_partial(work):
+    # Read only the job-created expected path, before deleting simulator/temp.
+    result=work/'result.xcresult'
+    if not result.exists() and not result.is_symlink():
+        print('RESULT: sim-test-partial:absent',flush=True)
+        return
+    try:
+        if not owned_result(work):
+            print('RESULT: sim-test-partial:unsafe',flush=True)
+            return
+        outcomes=partial_outcomes(partial_json(result,'summary'),partial_json(result,'tests'))
+    except Exception:
+        print('RESULT: sim-test-partial:unreadable',flush=True)
+        return
+    print('RESULT: sim-test-partial:available',flush=True)
+    for case,outcome in outcomes:
+        print('RESULT: sim-test-case:'+case+':'+outcome,flush=True)
+
 def main():
     global stage
     if platform.system()!='Darwin' or platform.machine()!='arm64': raise ValueError()
@@ -268,7 +332,12 @@ def main():
             if b'/ImageIO.framework/' not in deps or b'/CoreGraphics.framework/' not in deps or re.search(rb'curl|sqlite|madmedia_core',deps,re.I): raise ValueError()
             stage='sim-test'
             result=work/'result.xcresult'
-            run('xcodebuild','test-without-building',*common,'-resultBundlePath',result,cwd=app,timeout=420)
+            if result.exists() or result.is_symlink():raise ValueError()
+            try:
+                run('xcodebuild','test-without-building',*common,'-resultBundlePath',result,cwd=app,timeout=420)
+            except (subprocess.CalledProcessError,subprocess.TimeoutExpired):
+                report_partial(work)
+                raise
             stage='test-results'
             def results(key):
                 return json.loads(run('xcrun','xcresulttool','get','test-results',key,'--path',result,'--compact',capture=True))
