@@ -1,6 +1,8 @@
 """Portable structural tests; not Apple runtime evidence."""
 from pathlib import Path
 import tempfile
+import re
+import sqlite3
 import unittest
 from unittest.mock import patch
 import check
@@ -34,12 +36,45 @@ class Tests(unittest.TestCase):
             for forbidden in ('ImageIO','CoreGraphics','libcurl','madmedia_core','journal.cpp'):
                 self.assertNotIn(forbidden,pbx)
 
-    def test_two_exact_native_cases(self):
-        counts=dict(totalTestCount=2,passedTests=2,failedTests=0,skippedTests=0)
+    def test_three_exact_native_cases(self):
+        counts=dict(totalTestCount=3,passedTests=3,failedTests=0,skippedTests=0)
         nodes=[dict(nodeType='Test Case',nodeIdentifier=n,result='Passed') for n in sorted(check.CASES)]
-        with patch.object(check.base,'CASES',check.CASES):
-            check.base.verify(counts,{'testNodes':nodes})
-            with self.assertRaises(ValueError):check.base.verify(counts,{'testNodes':nodes[:1]})
-            with self.assertRaises(ValueError):check.base.verify(counts,{'testNodes':nodes+nodes[:1]})
+        check.verify(counts,{'testNodes':nodes})
+        for invalid in (nodes[:2],nodes+nodes[:1],nodes+[dict(nodes[0],nodeIdentifier='Unexpected')]):
+            with self.assertRaises(ValueError):check.verify(counts,{'testNodes':invalid})
+        for result in ('Skipped','Failed'):
+            with self.assertRaises(ValueError):
+                check.verify(counts,{'testNodes':nodes[:2]+[dict(nodes[2],result=result)]})
+        for key in ('totalTestCount','passedTests','failedTests','skippedTests'):
+            with self.assertRaises(ValueError):check.verify(dict(counts,**{key:42}),{'testNodes':nodes})
+
+    def test_exact_trigger_and_real_upsert_on_portable_sqlite(self):
+        production=(check.ROOT/'core/journal/journal.cpp').read_text()
+        ddl=re.search(r'kDDL = R"sql\((.*?)\)sql"',production,re.S)[1]
+        upsert=re.search(r'kUpsert = R"sql\((.*?)\)sql"',production,re.S)[1]
+        header=(check.ROOT/'ios-journal-preview/journal_rollback.h').read_text()
+        trigger=re.search(r'R"sql\((.*?)\)sql"',header,re.S)[1]
+        def bindings(state,done):
+            row=[None]*23
+            row[:4]=['rollback-fixture',0,state,0]
+            row[16]=done
+            return row
+        with tempfile.TemporaryDirectory() as tmp:
+            db=Path(tmp)/'isolated.sqlite'
+            journal=sqlite3.connect(db,isolation_level=None)
+            try:
+                self.assertEqual(journal.execute('PRAGMA journal_mode=WAL').fetchone(),('wal',))
+                journal.execute('PRAGMA synchronous=FULL')
+                journal.executescript(ddl)
+                journal.execute(upsert,bindings(0,11))
+                journal.executescript(trigger)
+                with self.assertRaises(sqlite3.IntegrityError):journal.execute(upsert,bindings(4,99))
+                self.assertFalse(journal.in_transaction)
+                self.assertEqual(journal.execute('SELECT state,bytes_done FROM transfer_task').fetchall(),[(0,11)])
+                journal.execute(upsert,bindings(4,37))
+            finally:journal.close()
+            reopened=sqlite3.connect(db)
+            try:self.assertEqual(reopened.execute('SELECT state,bytes_done FROM transfer_task').fetchall(),[(4,37)])
+            finally:reopened.close()
 
 if __name__=='__main__':unittest.main()

@@ -13,7 +13,8 @@ sys.path.insert(0,str(ROOT/'ios-image-preview'))
 spec=importlib.util.spec_from_file_location('image_runtime',ROOT/'ios-image-preview/check.py')
 base=importlib.util.module_from_spec(spec);spec.loader.exec_module(base)
 sys.path.pop(0)
-CASES={'PreviewTests/testInstalledJournalCommitCloseReopen','PreviewTests/testActualAppleEntropyProvider'}
+CASES={'PreviewTests/testInstalledJournalCommitCloseReopen','PreviewTests/testActualAppleEntropyProvider',
+       'PreviewTests/testInstalledJournalRollbackAndSameHandleRecovery'}
 FILES=('core/journal/journal.cpp','core/journal/journal.h','core/scheduler/types.h',
        'core/util/error.h','core/util/bitmap.h','core/util/log.h',
        'core/platform/entropy.h','ffi/platform/entropy_apple.cpp')
@@ -62,6 +63,23 @@ def project(app):
     text=text.replace(original,ARCHIVE).replace(frameworks,'"-lsqlite3","-framework","Security"')
     path.write_text(text)
 
+def verify(summary,tree):
+    for k,v in dict(totalTestCount=3,passedTests=3,failedTests=0,skippedTests=0).items():
+        if type(summary.get(k)) is not int or summary[k]!=v: raise ValueError()
+    if summary.get('testStatus','Passed')!='Passed' or summary.get('expectedFailures',0)!=0: raise ValueError()
+    seen=set()
+    def walk(nodes):
+        if not isinstance(nodes,list): raise ValueError()
+        for n in nodes:
+            if n.get('result','Passed')!='Passed': raise ValueError()
+            if n.get('nodeType')=='Test Case':
+                name=n['nodeIdentifier'].removesuffix('()')
+                if name not in CASES or name in seen or n.get('result')!='Passed': raise ValueError()
+                seen.add(name)
+            walk(n.get('children',[]))
+    walk(tree['testNodes'])
+    if seen!=CASES: raise ValueError()
+
 def main():
     global stage
     if platform.system()!='Darwin' or platform.machine()!='arm64':raise ValueError()
@@ -76,7 +94,7 @@ def main():
         work=Path(tmp).resolve()
         if not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(work)):raise ValueError()
         stage='install';app=install(work,sdk)
-        for name in ('App.mm','Tests.mm','journal_probe.h'):shutil.copyfile(ROOT/'ios-journal-preview'/name,app/name)
+        for name in ('App.mm','Tests.mm','journal_probe.h','journal_rollback.h'):shutil.copyfile(ROOT/'ios-journal-preview'/name,app/name)
         project(app)
         stage='sim-create'
         uuid=base.run('xcrun','simctl','create','MadMediaJournalPreview',base.DEVICE,base.RUNTIME,
@@ -106,11 +124,10 @@ def main():
             def results(key):
                 return json.loads(base.run('xcrun','xcresulttool','get','test-results',key,'--path',result,
                                            '--compact',capture=True,timeout=45))
-            base.CASES=CASES
-            base.verify(results('summary'),results('tests'))
+            verify(results('summary'),results('tests'))
         finally:
             base.run('xcrun','simctl','delete',uuid,timeout=90)
-    print('PASS: installed iOS ARM64 Journal and Apple entropy exact two tests')
+    print('PASS: installed iOS ARM64 Journal and Apple entropy exact three tests')
 
 if __name__=='__main__':
     try:main()

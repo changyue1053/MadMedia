@@ -27,3 +27,13 @@ intentionally omitted. The separate Apple lease fixture is not relabeled.
 Exact workflow trigger: `checkpoint/madmedia-ios-journal-preview`. Xcode
 26.2/17C52, official SDK/runtime 26.2, stock ARM64; no physical device, raw
 transcript or artifacts. Native execution is not implied by portable tests.
+
+The optional preview's third named XCTest uses a separate fresh app-private
+database. A transient bootstrap handle installs a fixture-only trigger that
+rejects one fixed update. The original installed Journal must return Io and
+read back the unchanged row, then accept a different update on the same handle
+and prepared statement. A fresh open must see exactly that successful row.
+This is deterministic statement rollback/error recovery, not engine or
+concurrent-writer behavior. It leaves the two earlier cases untouched. The
+portable suite also verifies the literal trigger against the actual Journal
+DDL/upsert in host SQLite; only the Simulator gate proves the C++ behavior.
