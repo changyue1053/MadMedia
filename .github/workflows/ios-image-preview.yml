@@ -1,0 +1,26 @@
+name: iOS installed ImageIO image preview
+on:
+  push:
+    branches: [checkpoint/madmedia-ios-image-preview]
+permissions:
+  contents: read
+jobs:
+  ios-image-arm64-simulator:
+    if: github.ref == 'refs/heads/checkpoint/madmedia-ios-image-preview'
+    runs-on: macos-15
+    timeout-minutes: 24
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Confirm exact clean source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA" && test -z "$(git status --porcelain)"
+      - name: Verify portable source and result contracts
+        run: python3 ios-image-preview/test_check.py
+      - name: Qualify relocated installed preview in ARM64 Simulator
+        run: python3 ios-image-preview/check.py

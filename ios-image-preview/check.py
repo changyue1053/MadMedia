@@ -1,0 +1,114 @@
+"""ARM64 Simulator only. Fixed stages, no upload or raw diagnostics."""
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import tempfile
+
+from project import project
+
+ROOT=Path(__file__).resolve().parents[1]
+CASES={'PreviewTests/testInstalledImageRoundTrip','PreviewTests/testInstalledImageBoundsAndCapacity'}
+stage='preflight'
+
+def run(*args,cwd=None,capture=False,timeout=120):
+    p=subprocess.run(args,cwd=cwd,stdin=subprocess.DEVNULL,
+                     stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL,timeout=timeout,check=True)
+    return p.stdout if capture else None
+
+def verify(summary,tree):
+    for k,v in dict(totalTestCount=2,passedTests=2,failedTests=0,skippedTests=0).items():
+        if type(summary.get(k)) is not int or summary[k]!=v: raise ValueError()
+    if summary.get('testStatus','Passed')!='Passed' or summary.get('expectedFailures',0)!=0: raise ValueError()
+    seen=set()
+    def walk(nodes):
+        if not isinstance(nodes,list): raise ValueError()
+        for n in nodes:
+            if n.get('result','Passed')!='Passed': raise ValueError()
+            if n.get('nodeType')=='Test Case':
+                name=n['nodeIdentifier'].removesuffix('()')
+                if name not in CASES or name in seen or n.get('result')!='Passed': raise ValueError()
+                seen.add(name)
+            walk(n.get('children',[]))
+    walk(tree['testNodes'])
+    if seen!=CASES: raise ValueError()
+
+def install(root, work, sdk):
+    source=work/'producer';source.mkdir()
+    build=work/'build';build.mkdir()
+    package=work/'prefix'
+    header='include/madmedia/ios_image_preview.h'
+    # Fixed source allowlist only. No root CMake or engine compile.
+    for item in ('image.c',header):
+        path=source/item;path.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copyfile(root/'ios-image-preview'/item,path)
+    obj=build/'image.o';archive=build/'libmadmedia_ios_image_preview.a'
+    run('xcrun','--sdk','iphonesimulator','clang','-target','arm64-apple-ios15.0-simulator',
+        '-isysroot',sdk,'-std=c11','-Wall','-Wextra','-Werror','-I',source/'include','-c',source/'image.c','-o',obj)
+    run('xcrun','libtool','-static','-o',archive,obj)
+    if run('xcrun','lipo','-archs',archive,capture=True).strip()!=b'arm64': raise ValueError()
+    if not re.search(rb'\bplatform\s+(?:IOSSIMULATOR|7)\b',run('xcrun','vtool','-show-build',obj,capture=True)):
+        raise ValueError()
+    (package/'lib').mkdir(parents=True)
+    (package/header).parent.mkdir(parents=True)
+    shutil.copyfile(archive,package/'lib'/archive.name)
+    shutil.copyfile(source/header,package/header)
+    consumer=work/'consumer';consumer.mkdir()
+    shutil.move(package,consumer/'Installed')
+    shutil.rmtree(source);shutil.rmtree(build)
+    if source.exists() or build.exists() or package.exists(): raise ValueError()
+    return consumer
+
+def main():
+    global stage
+    if platform.system()!='Darwin' or platform.machine()!='arm64': raise ValueError()
+    if run('xcodebuild','-version',capture=True).strip()!=b'Xcode 26.2\nBuild version 17C52': raise ValueError()
+    if run('xcrun','--sdk','iphonesimulator','--show-sdk-version',capture=True).strip()!=b'26.2': raise ValueError()
+    sdk=run('xcrun','--sdk','iphonesimulator','--show-sdk-path',capture=True).decode().strip()
+    with tempfile.TemporaryDirectory(prefix='madmedia-image-') as tmp:
+        work=Path(tmp).resolve()
+        stage='install-relocate';app=install(ROOT,work,sdk)
+        for src in ('App.mm','Tests.mm'): shutil.copyfile(ROOT/'ios-image-preview'/src,app/src)
+        project(app)
+        stage='sim-create'
+        uuid=run('xcrun','simctl','create','MadMediaImagePreview',
+            'com.apple.CoreSimulator.SimDeviceType.iPhone-17','com.apple.CoreSimulator.SimRuntime.iOS-26-2',capture=True).decode().strip()
+        if not re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}',uuid): raise ValueError()
+        try:
+            stage='sim-boot'
+            run('xcrun','simctl','boot',uuid)
+            run('xcrun','simctl','bootstatus',uuid,'-b',timeout=240)
+            if run('xcrun','simctl','spawn',uuid,'uname','-m',capture=True).strip()!=b'arm64': raise ValueError()
+            derived=work/'derived'
+            common=['-project','Preview.xcodeproj','-scheme','Preview','-configuration','Debug','ARCHS=arm64',
+                    'ONLY_ACTIVE_ARCH=YES','-parallel-testing-enabled','NO','-destination','platform=iOS Simulator,id='+uuid,
+                    '-derivedDataPath',derived,'CODE_SIGNING_ALLOWED=YES','CODE_SIGN_IDENTITY=-','CODE_SIGNING_REQUIRED=NO']
+            stage='sim-build'
+            run('xcodebuild','build-for-testing',*common,cwd=app,timeout=420)
+            binary=derived/'Build/Products/Debug-iphonesimulator/PreviewApp.app/PreviewApp'
+            stage='app-linkage'
+            if run('xcrun','lipo','-archs',binary,capture=True).strip()!=b'arm64': raise ValueError()
+            symbols=run('xcrun','nm','-g','-U',binary,capture=True)
+            if not re.search(rb'\b_madmedia_ios_jpeg_resize_v1$',symbols,re.M): raise ValueError()
+            deps=run('xcrun','otool','-L',binary,capture=True)
+            if b'/ImageIO.framework/' not in deps or b'/CoreGraphics.framework/' not in deps or re.search(rb'curl|sqlite|madmedia_core',deps,re.I): raise ValueError()
+            stage='sim-test'
+            result=work/'result.xcresult'
+            run('xcodebuild','test-without-building',*common,'-resultBundlePath',result,cwd=app,timeout=420)
+            stage='test-results'
+            def results(key):
+                return json.loads(run('xcrun','xcresulttool','get','test-results',key,'--path',result,'--compact',capture=True))
+            verify(results('summary'),results('tests'))
+        finally:
+            run('xcrun','simctl','delete',uuid,timeout=90)
+    print('PASS: exactly two installed ImageIO preview ARM64 Simulator tests')
+
+if __name__=='__main__':
+    try: main()
+    except Exception:
+        print('FAIL: iOS image preview stage='+stage)
+        raise SystemExit(1) from None
