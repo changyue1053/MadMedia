@@ -1,0 +1,26 @@
+name: iOS installed Journal and Apple entropy preview
+on:
+  push:
+    branches: [checkpoint/madmedia-ios-journal-preview]
+permissions:
+  contents: read
+jobs:
+  ios-journal-arm64-simulator:
+    if: github.ref == 'refs/heads/checkpoint/madmedia-ios-journal-preview'
+    runs-on: macos-15
+    timeout-minutes: 24
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Confirm exact clean source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA" && test -z "$(git status --porcelain)"
+      - name: Verify portable qualification contracts
+        run: python3 ios-journal-preview/test_check.py
+      - name: Qualify the relocated Journal preview against iOS system SQLite
+        run: python3 ios-journal-preview/check.py
