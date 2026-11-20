@@ -63,7 +63,7 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):check.verify_runtime({'runtimes':runtimes})
         source=(check.ROOT/'ios-image-preview/App.mm').read_text()
         self.assertIn('#if !TARGET_OS_SIMULATOR || !defined(__arm64__)',source)
-        self.assertEqual(source.count('if (!intendedRuntime()) return NO;'),2)
+        self.assertEqual(source.count('if (!intendedRuntime()) return'),2)
         self.assertIn('version.majorVersion==26 && version.minorVersion==2',source)
         runner=(check.ROOT/'ios-image-preview/check.py').read_text()
         self.assertNotIn("'spawn'",runner)
@@ -175,8 +175,9 @@ class Tests(unittest.TestCase):
 
     def test_seeded_input_artist_absent_in_all_outputs(self):
         fixture=(check.ROOT/'ios-image-preview/App.mm').read_text()
-        self.assertIn('if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return NO;',fixture)
-        self.assertIn('return !after[tiff][artist] && !afterLow[tiff][artist] && !afterSame[tiff][artist];',fixture)
+        self.assertIn('if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return "input-artist";',fixture)
+        self.assertIn('if (after[tiff][artist] || afterLow[tiff][artist] || afterSame[tiff][artist])',fixture)
+        self.assertIn('return "output-artist";',fixture)
         for unseeded in ('GPS','Exif','IPTC'):
             self.assertNotIn(f'kCGImageProperty{unseeded}Dictionary',fixture)
 
@@ -224,6 +225,25 @@ class Tests(unittest.TestCase):
                 if good:self.assertEqual(check.partial_json(Path('fixture'),'tests'),{'testNodes':[]})
                 else:
                     with self.assertRaises(ValueError):check.partial_json(Path('fixture'),'tests')
+
+    def test_known_roundtrip_marker_only_from_failed_exact_case(self):
+        case='PreviewTests/testInstalledImageRoundTrip'
+        def issue(message):return dict(nodeType='Failure Message',name=message)
+        def node(messages, name=case+'()', result='Failed'):
+            return dict(nodeType='Test Case',nodeIdentifier=name,result=result,children=messages)
+        def reason(*cases):return check.roundtrip_reason({'testNodes':[dict(children=list(cases))]})
+        good=issue('XCTFail failed - [MADMEDIA-ROUNDTRIP:quality-response]')
+        self.assertEqual(reason(node([good])),'quality-response')
+        for invalid in (node([good],name='PreviewTests/testInstalledImageBoundsAndCapacity'),
+                        node([good],result='Passed'),node([issue('[MADMEDIA-ROUNDTRIP:private-reason]')]),
+                        node([issue('[MADMEDIA-ROUNDTRIP:quality-response][MADMEDIA-ROUNDTRIP:other]')]),
+                        node([good,good]),node([dict(nodeType='Attachment',name=good['name'])])):
+            self.assertEqual(reason(invalid),'unavailable')
+        self.assertEqual(reason(node([good]),node([good])),'unavailable')
+        self.assertEqual(reason(node([issue('/private/content [MADMEDIA-ROUNDTRIP:high-pixels]')])), 'high-pixels')
+        app=(check.ROOT/'ios-image-preview/App.mm').read_text().split('const char *madmedia_preview_roundtrip() {',1)[1].split('extern "C"',1)[0]
+        declared=set(re.findall(r'"([a-z-]+)"',app))
+        self.assertEqual(declared,check.ROUNDTRIP_REASONS)
 
     def test_branch_scope(self):
         workflow=(check.ROOT/'.github/workflows/ios-image-preview.yml').read_text()

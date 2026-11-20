@@ -53,7 +53,8 @@ static NSData *fixture() {
     return ok?data:nil;
 }
 
-static NSDictionary *inspectJpeg(NSData *data, size_t w, size_t h, BOOL content) {
+static NSDictionary *inspectJpeg(NSData *data, size_t w, size_t h, BOOL content, BOOL *shape = nullptr) {
+    if (shape) *shape=NO;
     if (!data) return nil;
     CGImageSourceRef src=CGImageSourceCreateWithData((__bridge CFDataRef)data,NULL);
     if (!src) return nil;
@@ -61,6 +62,7 @@ static NSDictionary *inspectJpeg(NSData *data, size_t w, size_t h, BOOL content)
     CGImageRef img=CGImageSourceCreateImageAtIndex(src,0,NULL);
     BOOL ok=CGImageSourceGetType(src) && CFEqual(CGImageSourceGetType(src),CFSTR("public.jpeg")) &&
         img && CGImageGetWidth(img)==w && CGImageGetHeight(img)==h;
+    if (shape) *shape=ok && info!=nil;
     if (ok && content) {
         std::vector<uint8_t> pixels(w*h*4);
         CGColorSpaceRef color=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
@@ -98,22 +100,35 @@ static BOOL intendedRuntime() {
     return version.majorVersion==26 && version.minorVersion==2;
 }
 
-extern "C" __attribute__((used,visibility("default"))) BOOL madmedia_preview_roundtrip() {
-    if (!intendedRuntime()) return NO;
+extern "C" __attribute__((used,visibility("default"))) const char *madmedia_preview_roundtrip() {
+    if (!intendedRuntime()) return "runtime";
     NSData *input=fixture();
+    if (!input) return "fixture-encode";
     NSDictionary *before=inspectJpeg(input,96,48,NO);
+    if (!before) return "input-decode-or-shape";
     NSString *tiff=(__bridge NSString *)kCGImagePropertyTIFFDictionary;
     NSString *artist=(__bridge NSString *)kCGImagePropertyTIFFArtist;
-    if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return NO;
-    NSData *high=resize(input,32,95), *low=resize(input,32,20);
-    NSDictionary *after=inspectJpeg(high,32,16,YES);
-    NSDictionary *afterLow=inspectJpeg(low,32,16,YES);
-    if (!after || !afterLow || high.length<=low.length) return NO;
-    NSDictionary *afterSame=inspectJpeg(resize(input,128,95),96,48,YES);
-    if (!afterSame) return NO;
-    // ImageIO may generate metadata. Prove the observed input field was
-    // not carried into any of the three independently decoded outputs.
-    return !after[tiff][artist] && !afterLow[tiff][artist] && !afterSame[tiff][artist];
+    if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return "input-artist";
+
+    NSData *high=resize(input,32,95);
+    if (!high) return "high-codec";
+    NSData *low=resize(input,32,20);
+    if (!low) return "low-codec";
+    BOOL shape=NO;
+    NSDictionary *after=inspectJpeg(high,32,16,YES,&shape);
+    if (!after) return shape?"high-pixels":"high-decode-or-shape";
+    NSDictionary *afterLow=inspectJpeg(low,32,16,YES,&shape);
+    if (!afterLow) return shape?"low-pixels":"low-decode-or-shape";
+    if (high.length<=low.length) return "quality-response";
+
+    NSData *same=resize(input,128,95);
+    if (!same) return "no-upscale-codec";
+    NSDictionary *afterSame=inspectJpeg(same,96,48,YES,&shape);
+    if (!afterSame) return shape?"no-upscale-pixels":"no-upscale-decode-or-shape";
+    // Check the seeded Artist field in all outputs, not generated metadata.
+    if (after[tiff][artist] || afterLow[tiff][artist] || afterSame[tiff][artist])
+        return "output-artist";
+    return nullptr;
 }
 
 extern "C" __attribute__((used,visibility("default"))) BOOL madmedia_preview_contract() {

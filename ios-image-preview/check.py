@@ -272,6 +272,36 @@ def partial_outcomes(summary,tree):
             pending.append(node.get('children',[]))
     return [(label,found.get(name,'absent')) for name,label in CASE_LABELS.items()]
 
+ROUNDTRIP_REASONS=frozenset((
+    'runtime','fixture-encode','input-decode-or-shape','input-artist',
+    'high-codec','low-codec','high-pixels','high-decode-or-shape',
+    'low-pixels','low-decode-or-shape','quality-response','no-upscale-codec',
+    'no-upscale-pixels','no-upscale-decode-or-shape','output-artist',
+))
+ROUNDTRIP_MARKER=re.compile(r'\[MADMEDIA-ROUNDTRIP:([a-z-]{1,40})\]')
+
+def roundtrip_reason(tree):
+    # xcresulttool tests emits a named Failure Message node below the Test Case.
+    # Do not inspect other test cases, arbitrary fields or raw transcripts.
+    stack=list(tree['testNodes'])
+    cases=[]
+    while stack:
+        node=stack.pop()
+        if node.get('nodeType')=='Test Case':
+            if node['nodeIdentifier'].removesuffix('()')=='PreviewTests/testInstalledImageRoundTrip':
+                cases.append(node)
+            continue
+        stack.extend(node.get('children',[]))
+    if len(cases)!=1 or cases[0].get('result')!='Failed':return 'unavailable'
+    messages=[n.get('name') for n in cases[0].get('children',[]) if n.get('nodeType')=='Failure Message']
+    if len(messages)!=1 or not isinstance(messages[0],str):return 'unavailable'
+    # XCTest can prepend its own short assertion label. Match a single exact
+    # bracketed marker and emit nothing from the surrounding message.
+    markers=ROUNDTRIP_MARKER.findall(messages[0])
+    if messages[0].count('[MADMEDIA-ROUNDTRIP:')!=1 or len(markers)!=1 or markers[0] not in ROUNDTRIP_REASONS:
+        return 'unavailable'
+    return markers[0]
+
 def report_partial(work):
     # Read only the job-created expected path, before deleting simulator/temp.
     result=work/'result.xcresult'
@@ -282,13 +312,16 @@ def report_partial(work):
         if not owned_result(work):
             print('RESULT: sim-test-partial:unsafe',flush=True)
             return
-        outcomes=partial_outcomes(partial_json(result,'summary'),partial_json(result,'tests'))
+        summary=partial_json(result,'summary'); tree=partial_json(result,'tests')
+        outcomes=partial_outcomes(summary,tree)
+        reason=roundtrip_reason(tree) if ('roundtrip','failed') in outcomes else None
     except Exception:
         print('RESULT: sim-test-partial:unreadable',flush=True)
         return
     print('RESULT: sim-test-partial:available',flush=True)
     for case,outcome in outcomes:
         print('RESULT: sim-test-case:'+case+':'+outcome,flush=True)
+    if reason is not None:print('RESULT: sim-test-roundtrip-reason:'+reason,flush=True)
 
 def main():
     global stage
