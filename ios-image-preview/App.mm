@@ -6,6 +6,7 @@
 #endif
 #include <madmedia/ios_image_preview.h>
 #include <vector>
+#include <cstring>
 
 @interface PreviewAppDelegate : UIResponder <UIApplicationDelegate>
 @property(nonatomic,strong) UIWindow *window;
@@ -21,6 +22,50 @@
 @end
 int main(int argc, char* argv[]) {
     @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(PreviewAppDelegate.class)); }
+}
+
+// Test-only helper, called only on this freshly encoded 96x48 fixture.
+// Exif APP1 payload: little-endian TIFF, first IFD at 8, one ASCII
+// Artist (0x013B), its NUL-terminated value at offset 26, no next IFD.
+static const uint8_t fixtureArtistApp1[] = {
+    0xff, 0xe1, 0x00, 0x39, 0x45, 0x78, 0x69, 0x66, 0x00, 0x00, 0x49, 0x49,
+    0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x3b, 0x01, 0x02, 0x00,
+    0x17, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x53, 0x79, 0x6e, 0x74, 0x68, 0x65, 0x74, 0x69, 0x63, 0x20, 0x66, 0x69,
+    0x78, 0x74, 0x75, 0x72, 0x65, 0x20, 0x6f, 0x6e, 0x6c, 0x79, 0x00,
+};
+
+static NSData *seedFixtureArtist(NSData *fresh) {
+    const auto *src=static_cast<const uint8_t *>(fresh.bytes);
+    const size_t n=fresh.length;
+    if (n<6 || n>128*1024 || src[0]!=0xff || src[1]!=0xd8 ||
+        src[n-2]!=0xff || src[n-1]!=0xd9) return nil;
+    NSMutableData *seeded=[NSMutableData dataWithCapacity:n+sizeof fixtureArtistApp1];
+    [seeded appendBytes:src length:2];
+    BOOL inserted=NO;
+    for (size_t at=2; n-at>=4;) {
+        if (src[at]!=0xff) return nil;
+        const uint8_t kind=src[at+1];
+        // Fresh ImageIO JPEG header only. No standalone/reserved marker
+        // accepted here; entropy-coded data is never interpreted or modified.
+        if (kind<0xc0 || kind==0xff || (kind>=0xd0 && kind<=0xd9)) return nil;
+        const size_t length=static_cast<size_t>(src[at+2])*256+src[at+3];
+        if (length<2 || length>n-at-2) return nil;
+        if (!inserted && kind!=0xe0) {
+            [seeded appendBytes:fixtureArtistApp1 length:sizeof fixtureArtistApp1];
+            inserted=YES;
+        }
+        if (kind==0xda) {
+            if (at+2+length>=n-2) return nil;
+            [seeded appendBytes:src+at length:n-at];
+            return seeded;
+        }
+        // Prevent duplicate Exif IFDs if the local encoder supplied its own.
+        if (!(kind==0xe1 && length>=8 && std::memcmp(src+at+4,"Exif\0\0",6)==0))
+            [seeded appendBytes:src+at length:2+length];
+        at+=2+length;
+    }
+    return nil;
 }
 
 static NSData *fixture() {
@@ -42,15 +87,13 @@ static NSData *fixture() {
     CGImageDestinationRef dst=CGImageDestinationCreateWithData((__bridge CFMutableDataRef)data,CFSTR("public.jpeg"),1,NULL);
     BOOL ok=NO;
     if (dst) {
-        NSDictionary *metadata=@{(__bridge NSString *)kCGImagePropertyTIFFDictionary:
-             @{(__bridge NSString *)kCGImagePropertyTIFFArtist:@"Synthetic fixture only"},
-             (__bridge NSString *)kCGImageDestinationLossyCompressionQuality:@0.98};
-        CGImageDestinationAddImage(dst,image,(__bridge CFDictionaryRef)metadata);
+        NSDictionary *options=@{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality:@0.98};
+        CGImageDestinationAddImage(dst,image,(__bridge CFDictionaryRef)options);
         ok=CGImageDestinationFinalize(dst);
         CFRelease(dst);
     }
     CGImageRelease(image);
-    return ok?data:nil;
+    return ok?seedFixtureArtist(data):nil;
 }
 
 static NSDictionary *inspectJpeg(NSData *data, size_t w, size_t h, BOOL content, BOOL *shape = nullptr) {

@@ -6,6 +6,7 @@ import json
 import re
 import contextlib
 import subprocess
+import struct
 import unittest
 from unittest.mock import patch
 import check
@@ -172,6 +173,26 @@ class Tests(unittest.TestCase):
                 check.run('xcodebuild','build-for-testing')
         self.assertIn('CATEGORY: sim-build:link-library-other\n',output.getvalue())
         self.assertNotIn('unreleased-name',output.getvalue())
+
+    def test_fixed_exif_artist_segment_structure(self):
+        app=(check.ROOT/'ios-image-preview/App.mm').read_text()
+        source=app.split('static const uint8_t fixtureArtistApp1[] = {',1)[1].split('};',1)[0]
+        segment=bytes(int(h,16) for h in re.findall(r'0x([0-9a-f]{2})',source))
+        self.assertEqual(segment[:2],b'\xff\xe1')
+        self.assertEqual(int.from_bytes(segment[2:4],'big'),len(segment)-2)
+        self.assertEqual(segment[4:10],b'Exif\x00\x00')
+        tiff=segment[10:]
+        self.assertEqual(tiff[:2],b'II')
+        magic,ifd=struct.unpack_from('<HI',tiff,2)
+        self.assertEqual((magic,ifd),(42,8))
+        entries,tag,kind,count,offset,next_ifd=struct.unpack_from('<HHHIII',tiff,ifd)
+        self.assertEqual((entries,tag,kind,count,offset,next_ifd),(1,0x013b,2,23,26,0))
+        self.assertEqual(offset+count,len(tiff))
+        self.assertEqual(tiff[offset:offset+count],b'Synthetic fixture only\x00')
+        self.assertIn('return ok?seedFixtureArtist(data):nil;',app)
+        self.assertIn('if (length<2 || length>n-at-2) return nil;',app)
+        self.assertIn('[seeded appendBytes:src+at length:n-at]',app)
+        self.assertEqual(app.count('seedFixtureArtist('),2)
 
     def test_seeded_input_artist_absent_in_all_outputs(self):
         fixture=(check.ROOT/'ios-image-preview/App.mm').read_text()
