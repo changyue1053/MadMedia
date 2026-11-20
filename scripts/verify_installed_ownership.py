@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import signal
@@ -19,8 +20,8 @@ class Rejected(RuntimeError):
     pass
 
 
-def start(argv, *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL):
-    return subprocess.Popen(argv, stdin=stdin, stdout=stdout, stderr=subprocess.DEVNULL,
+def start(argv, *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+    return subprocess.Popen(argv, stdin=stdin, stdout=stdout, stderr=stderr,
                             start_new_session=True)
 
 
@@ -61,14 +62,90 @@ def process(argv, **kwargs):
                     stream.close()
 
 
+MAX_DIAGNOSTIC_BYTES = 64 * 1024
+CONFIGURE_FAILURES = {
+    "c-compiler": rb"(?m)^ *(?:No CMAKE_C_COMPILER could be found\.|"
+                  rb"(?:-- )?The C compiler identification is unknown) *$",
+    "cxx-compiler": rb"(?m)^ *(?:No CMAKE_CXX_COMPILER could be found\.|"
+                    rb"(?:-- )?The CXX compiler identification is unknown) *$",
+    "system-threads": rb"(?m)^ *Could NOT find Threads \(missing: [^\r\n()]+\) *$",
+    "system-sqlite-development": rb"(?m)^ *Could NOT find SQLite3 \(missing: [^\r\n()]+\) *$",
+    "transitive-curl-development": rb"(?m)^ *Could NOT find CURL \(missing: [^\r\n()]+\) *$",
+}
+CURL_LINK_FAILURE = re.compile(
+    rb"(?m)^(?:[^ \t:\r\n]*/)?ld(?:\.lld)?:[^\r\n]*"
+    rb"(?:cannot find -lcurl(?:[ :]|$)|undefined reference to [`']curl_[A-Za-z0-9_]+')"
+)
+
+
+def classify_failure(stage, output):
+    # Only these fixed labels may escape. Recognizing a stock dependency
+    # discovery failure is not proof the packages are physically absent.
+    if len(output) > MAX_DIAGNOSTIC_BYTES:
+        return stage + ":output-limit"
+    normalized = output.replace(b"\r\n", b"\n")
+    if stage.endswith("-configure"):
+        matches = [label for label, pattern in CONFIGURE_FAILURES.items() if re.search(pattern, normalized)]
+        if len(matches) == 1:
+            return stage + ":" + matches[0]
+    elif stage in ("owner-build", "contender-build") and CURL_LINK_FAILURE.search(normalized):
+        return stage + ":transitive-curl-link"
+    return stage
+
+
+def capture(child, deadline, timeout):
+    # Drain even on success and after the diagnostic prefix fills, so the
+    # leader can make progress. A descendant holding the pipe must not hide
+    # the leader's exit status or force us to wait for EOF.
+    prefix = bytearray()
+    descriptor = child.stdout.fileno()
+    os.set_blocking(descriptor, False)
+    pidfd = os.pidfd_open(child.pid)
+    def read_now():
+        try:
+            chunk = os.read(descriptor, 8192)
+        except BlockingIOError:
+            return None
+        remaining = MAX_DIAGNOSTIC_BYTES + 1 - len(prefix)
+        if remaining and chunk:
+            prefix.extend(chunk[:remaining])
+        return chunk
+    try:
+        monitors = [pidfd, descriptor]
+        while True:
+            seconds = deadline - time.monotonic()
+            if seconds <= 0:
+                raise subprocess.TimeoutExpired(child.args[0], timeout)
+            ready = select.select(monitors, [], [], seconds)[0]
+            if not ready:
+                raise subprocess.TimeoutExpired(child.args[0], timeout)
+            if pidfd in ready:
+                stop_group(child)
+                # The leader is still unreaped. Preserve already-queued bytes
+                # without waiting for a descendant or collecting past the cap.
+                while descriptor in monitors and len(prefix) <= MAX_DIAGNOSTIC_BYTES and read_now():
+                    pass
+                return child.wait(timeout=5), bytes(prefix)
+            if descriptor in ready and read_now() == b"":
+                monitors.remove(descriptor)
+    finally:
+        os.close(pidfd)
+
+
 def run(stage, argv, timeout=240):
     print(f"STAGE: {stage}", flush=True)
+    deadline = time.monotonic() + timeout
     try:
-        with process(argv) as child:
-            if wait_group(child, timeout) != 0:
-                raise Rejected(stage)
-    except (OSError, subprocess.TimeoutExpired):
-        raise Rejected(stage) from None
+        with process(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as child:
+            status, output = capture(child, deadline, timeout)
+            if status != 0:
+                raise Rejected(classify_failure(stage, output))
+    except FileNotFoundError:
+        raise Rejected(stage + ":cmake-unavailable") from None
+    except OSError:
+        raise Rejected(stage + ":process-unavailable") from None
+    except subprocess.TimeoutExpired:
+        raise Rejected(stage + ":timeout") from None
 
 
 def get(child, expected, deadline, stage):
