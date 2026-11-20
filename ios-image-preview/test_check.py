@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import io
+import json
 import contextlib
 import subprocess
 import unittest
@@ -58,6 +59,21 @@ class Tests(unittest.TestCase):
         self.assertIn("stage='sim-ready'",runner)
         self.assertIn("'simctl','boot',uuid,timeout=60",runner)
         self.assertIn("'simctl','bootstatus',uuid,'-b',timeout=240",runner)
+
+    def test_runtime_query_categories_and_single_call(self):
+        good=json.dumps({'runtimes':[dict(identifier=check.RUNTIME,isAvailable=True)]}).encode()
+        with patch.object(check,'run',return_value=good) as query:
+            check.preflight_runtime()
+            query.assert_called_once_with('xcrun','simctl','list','runtimes','available','-j',
+                                          capture=True,timeout=120)
+        for reason,payload,error in (('timeout',None,subprocess.TimeoutExpired(['redacted'],120)),
+                ('query',None,subprocess.CalledProcessError(1,['redacted'])),
+                ('query',None,FileNotFoundError('redacted')),('json',b'not json',None),
+                ('json',b'{"runtimes":[12]}',None),('absent',b'{"runtimes":[]}',None)):
+            with patch.object(check,'run',return_value=payload,side_effect=error) as query:
+                with self.assertRaises(check.RuntimeRejected) as caught: check.preflight_runtime()
+                self.assertEqual(caught.exception.code,reason)
+                self.assertEqual(query.call_count,1)
 
     def test_xcode_categories_do_not_echo_transcript(self):
         fixtures=(('error: /not-public: file not found','missing-input'),

@@ -101,9 +101,37 @@ def install(root, work, sdk):
     if source.exists() or build.exists() or package.exists(): raise ValueError()
     return consumer
 
+class RuntimeRejected(ValueError):
+    CODES={'timeout','query','json','absent'}
+
+    def __init__(self, code):
+        if code not in self.CODES: raise ValueError()
+        self.code=code
+        super().__init__(code)
+
 def verify_runtime(document):
-    matches=[r for r in document['runtimes'] if r.get('identifier')==RUNTIME]
-    if len(matches)!=1 or matches[0].get('isAvailable') is not True: raise ValueError()
+    if not isinstance(document,dict) or not isinstance(document.get('runtimes'),list):
+        raise RuntimeRejected('json')
+    if any(not isinstance(r,dict) or not isinstance(r.get('identifier'),str)
+           for r in document['runtimes']):
+        raise RuntimeRejected('json')
+    matches=[r for r in document['runtimes'] if r['identifier']==RUNTIME]
+    if len(matches)!=1 or matches[0].get('isAvailable') is not True:
+        raise RuntimeRejected('absent')
+
+def preflight_runtime():
+    try:
+        payload=run('xcrun','simctl','list','runtimes','available','-j',capture=True,timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeRejected('timeout') from None
+    except (subprocess.CalledProcessError,OSError):
+        raise RuntimeRejected('query') from None
+    try:
+        document=json.loads(payload)
+    except (ValueError,UnicodeError,RecursionError):
+        raise RuntimeRejected('json') from None
+    verify_runtime(document)
+
 
 def main():
     global stage
@@ -114,7 +142,10 @@ def main():
     if run('xcrun','--sdk','iphonesimulator','--show-sdk-version',capture=True,timeout=30).strip()!=b'26.2': raise ValueError()
     sdk=run('xcrun','--sdk','iphonesimulator','--show-sdk-path',capture=True,timeout=30).decode().strip()
     stage='runtime-preflight'
-    verify_runtime(json.loads(run('xcrun','simctl','list','runtimes','available','-j',capture=True,timeout=30)))
+    try: preflight_runtime()
+    except RuntimeRejected as error:
+        print('CATEGORY: runtime-preflight:'+error.code,flush=True)
+        raise
     with tempfile.TemporaryDirectory(prefix='madmedia-image-') as tmp:
         work=Path(tmp).resolve()
         stage='install-relocate';app=install(ROOT,work,sdk)
