@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import io
 import json
+import re
 import contextlib
 import subprocess
 import unittest
@@ -38,7 +39,15 @@ class Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);check.project(root)
             pbx=(root/'Preview.xcodeproj/project.pbxproj').read_text()
-            self.assertEqual(pbx.count('Installed/lib/libmadmedia_ios_image_preview.a'),1)
+            archive='Installed/lib/libmadmedia_ios_image_preview.a'
+            ref=re.search(r'"([A-F0-9]{24})" = \{ "isa" = "PBXFileReference"; "path" = "'+re.escape(archive)+r'";',pbx)
+            self.assertIsNotNone(ref)
+            self.assertNotIn('"fileRef" = "'+ref[1]+'";',pbx)
+            flags=[json.loads('['+x+']') for x in re.findall(r'"OTHER_LDFLAGS" = \(([^;]*)\);',pbx)]
+            self.assertEqual(len(flags),2)
+            self.assertEqual(flags[0][1],'"$(PROJECT_DIR)/'+archive+'"')
+            self.assertNotIn(archive,str(flags[1]))
+            self.assertNotIn('LIBRARY_SEARCH_PATHS',pbx)
             self.assertIn('Installed/include',pbx)
             self.assertIn('"CoreFoundation"',pbx)
             self.assertEqual(pbx.count('"-lc++"'),1)

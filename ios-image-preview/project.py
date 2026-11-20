@@ -25,13 +25,13 @@ def project(directory):
             return make(type_, files=entries, buildActionMask=2147483647,
                         runOnlyForDeploymentPostprocessing=0)
         source_phase = phase('PBXSourcesBuildPhase', [make('PBXBuildFile', fileRef=x) for x in refs])
-        link = []
         if kind == 'application':
             archive = make('PBXFileReference', path='Installed/lib/libmadmedia_ios_image_preview.a',
                            sourceTree='SOURCE_ROOT', lastKnownFileType='archive.ar')
             sources.append(archive)
-            link.append(make('PBXBuildFile', fileRef=archive))
-        frameworks = phase('PBXFrameworksBuildPhase', link)
+        # Keep the archive visible in the navigator, but do not let the
+        # link phase synthesize a library-name search for it.
+        frameworks = phase('PBXFrameworksBuildPhase', [])
         path, ptype = (name+'.app','wrapper.application') if kind=='application' else (name+'.xctest','wrapper.cfbundle')
         product = make('PBXFileReference', path=path, explicitFileType=ptype, sourceTree='BUILT_PRODUCTS_DIR')
         products.append(product)
@@ -41,7 +41,8 @@ def project(directory):
                         dict(defaults, PRODUCT_NAME=name, PRODUCT_BUNDLE_IDENTIFIER='org.madmedia.preview.'+name,
                              **settings)))
     app = target('PreviewApp','application',[('App.mm','sourcecode.cpp.objcpp')],
-                 dict(CLANG_CXX_LIBRARY='libc++', OTHER_LDFLAGS=['-lc++','-framework','Foundation','-framework','UIKit','-framework','CoreFoundation','-framework','ImageIO','-framework','CoreGraphics'],
+                 dict(CLANG_CXX_LIBRARY='libc++', OTHER_LDFLAGS=['-lc++','"$(PROJECT_DIR)/Installed/lib/libmadmedia_ios_image_preview.a"',
+                                               '-framework','Foundation','-framework','UIKit','-framework','CoreFoundation','-framework','ImageIO','-framework','CoreGraphics'],
                       HEADER_SEARCH_PATHS=['$(PROJECT_DIR)/Installed/include'], ENABLE_DEBUG_DYLIB='NO', DEAD_CODE_STRIPPING='NO', INFOPLIST_KEY_UILaunchScreen_Generation='YES'))
     tests = target('PreviewTests','bundle.unit-test',[('Tests.mm','sourcecode.cpp.objcpp')],
                    dict(TEST_HOST='$(BUILT_PRODUCTS_DIR)/PreviewApp.app/PreviewApp', BUNDLE_LOADER='$(TEST_HOST)',
