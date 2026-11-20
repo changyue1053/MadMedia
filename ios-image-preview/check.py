@@ -273,10 +273,10 @@ def partial_outcomes(summary,tree):
     return [(label,found.get(name,'absent')) for name,label in CASE_LABELS.items()]
 
 ROUNDTRIP_REASONS=frozenset((
-    'runtime','fixture-encode','input-decode-or-shape','input-artist',
+    'runtime','fixture-encode','input-decode-or-shape','input-artist-bytes','input-artist-property-mismatch',
     'high-codec','low-codec','high-pixels','high-decode-or-shape',
     'low-pixels','low-decode-or-shape','quality-response','no-upscale-codec',
-    'no-upscale-pixels','no-upscale-decode-or-shape','output-artist',
+    'no-upscale-pixels','no-upscale-decode-or-shape','output-artist','output-artist-invalid','output-artist-bytes',
 ))
 ROUNDTRIP_MARKER=re.compile(r'\[MADMEDIA-ROUNDTRIP:([a-z-]{1,40})\]')
 
@@ -339,7 +339,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='madmedia-image-') as tmp:
         work=Path(tmp).resolve()
         stage='install-relocate';app=install(ROOT,work,sdk)
-        for src in ('App.mm','Tests.mm'): shutil.copyfile(ROOT/'ios-image-preview'/src,app/src)
+        for src in ('App.mm','Tests.mm','fixture_artist_check.h'): shutil.copyfile(ROOT/'ios-image-preview'/src,app/src)
         project(app)
         stage='sim-create'
         uuid=run('xcrun','simctl','create','MadMediaImagePreview',

@@ -194,9 +194,70 @@ class Tests(unittest.TestCase):
         self.assertIn('[seeded appendBytes:src+at length:n-at]',app)
         self.assertEqual(app.count('seedFixtureArtist('),2)
 
+    def test_compiled_artist_parser_controls(self):
+        app=(check.ROOT/'ios-image-preview/App.mm').read_text()
+        source=app.split('static const uint8_t fixtureArtistApp1[] = {',1)[1].split('};',1)[0]
+        exif=bytes(int(h,16) for h in re.findall(r'0x([0-9a-f]{2})',source))
+        # Structural parser input only; Apple runtime tests also re-decode pixels.
+        def frame(segments):return b'\xff\xd8'+segments+b'\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x20\xff\xd9'
+        def app1(payload):return b'\xff\xe1'+struct.pack('>H',len(payload)+2)+payload
+        tiff_be=b'MM'+struct.pack('>HIHHHIII',42,8,1,0x013b,2,23,26,0)+b'Synthetic fixture only\x00'
+        tiff_absent=b'II'+struct.pack('<HIHI',42,8,0,0)
+        malformed_offset=bytearray(exif);malformed_offset[28:32]=b'\xff'*4
+        artist=b'Synthetic fixture only\x00'
+        # Both Artist entries are valid and point into their own complete
+        # values after the two-entry IFD. Duplicate tag alone is disallowed.
+        duplicate=(b'II'+struct.pack('<HIH',42,8,2)+
+                   struct.pack('<HHII',0x013b,2,23,38)+struct.pack('<HHII',0x013b,2,23,61)+
+                   struct.pack('<I',0)+artist+artist)
+        duplicate=app1(b'Exif\x00\x00'+duplicate)
+        scan=b'\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00'
+        eoi=b'\xff\xd9'
+        # Two structurally framed scans, containing stuffed FF, RST and fill.
+        progressive=b'\xff\xd8'+scan+b'\x20\xff\x00\xff\xd0\x4c'
+        after_scan=progressive+exif+scan+b'\x11\xff'+eoi
+        bad_nul=exif[:-1]+b'X'
+        fixtures=[
+            (frame(exif),'sentinel'),
+            (frame(app1(b'Exif\x00\x00'+tiff_be)),'sentinel'),
+            (frame(b''),'absent'),
+            (frame(app1(b'Exif\x00\x00'+tiff_absent)),'absent'),
+            (frame(app1(b'not EXIF: Synthetic fixture only\x00')),'absent'),
+            (frame(exif.replace(b'Synthetic',b'Different')),'other'),
+            (frame(bytes(malformed_offset)),'invalid'),
+            (frame(duplicate),'invalid'),
+            (after_scan,'sentinel'),
+            (progressive+scan+b'\x11\xff'+eoi,'absent'),
+            (progressive+exif+eoi,'sentinel'),
+            (after_scan+eoi,'invalid'),
+            (b'\xff\xd8\xff\xd0'+scan+b'\x20'+eoi,'invalid'),
+            (b'\xff\xd8'+scan+b'\xff\xff\x00'+eoi,'invalid'),
+            (b'\xff\xd8'+scan+eoi,'invalid'),
+            (frame(bad_nul),'invalid'),
+            (frame(exif+exif),'invalid'),
+            (frame(exif)[:-2],'invalid'),
+            (frame(b'\xff\xe1\xff\xff'+exif[4:]),'invalid'),
+        ]
+        with tempfile.TemporaryDirectory() as work:
+            p=Path(work)
+            cpp=['#include "fixture_artist_check.h"','int main() {']
+            for i,(data,outcome) in enumerate(fixtures,1):
+                cpp.append(f'const uint8_t fixture{i}[]={{'+','.join(str(v) for v in data)+'};')
+                cpp.append(f'if (fixture_artist::jpeg(fixture{i},sizeof fixture{i})!=fixture_artist::Status::{outcome}) return {i};')
+            cpp+=['return 0;','}']
+            (p/'probe.cpp').write_text('\n'.join(cpp))
+            binary=p/'probe'
+            build=subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror',
+                                  '-I',check.ROOT/'ios-image-preview',p/'probe.cpp','-o',binary],
+                                 stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+            self.assertEqual(build.returncode,0)
+            self.assertEqual(subprocess.run([binary],timeout=10).returncode,0)
+
     def test_seeded_input_artist_absent_in_all_outputs(self):
         fixture=(check.ROOT/'ios-image-preview/App.mm').read_text()
-        self.assertIn('if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return "input-artist";',fixture)
+        self.assertIn('!=fixture_artist::Status::sentinel)',fixture)
+        self.assertIn('if (before[tiff][artist] && ![before[tiff][artist] isEqual:@"Synthetic fixture only"])',fixture)
+        self.assertIn('if (artistBytes!=fixture_artist::Status::absent)',fixture)
         self.assertIn('if (after[tiff][artist] || afterLow[tiff][artist] || afterSame[tiff][artist])',fixture)
         self.assertIn('return "output-artist";',fixture)
         for unseeded in ('GPS','Exif','IPTC'):

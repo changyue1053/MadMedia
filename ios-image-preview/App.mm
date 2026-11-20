@@ -7,6 +7,7 @@
 #include <madmedia/ios_image_preview.h>
 #include <vector>
 #include <cstring>
+#include "fixture_artist_check.h"
 
 @interface PreviewAppDelegate : UIResponder <UIApplicationDelegate>
 @property(nonatomic,strong) UIWindow *window;
@@ -151,7 +152,12 @@ extern "C" __attribute__((used,visibility("default"))) const char *madmedia_prev
     if (!before) return "input-decode-or-shape";
     NSString *tiff=(__bridge NSString *)kCGImagePropertyTIFFDictionary;
     NSString *artist=(__bridge NSString *)kCGImagePropertyTIFFArtist;
-    if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return "input-artist";
+    if (fixture_artist::jpeg(static_cast<const uint8_t *>(input.bytes),input.length)!=fixture_artist::Status::sentinel)
+        return "input-artist-bytes";
+    // ImageIO may omit TIFF Artist on iOS. An exposed value must agree with
+    // the independently validated wire field; omission is not lack of seed.
+    if (before[tiff][artist] && ![before[tiff][artist] isEqual:@"Synthetic fixture only"])
+        return "input-artist-property-mismatch";
 
     NSData *high=resize(input,32,95);
     if (!high) return "high-codec";
@@ -168,7 +174,12 @@ extern "C" __attribute__((used,visibility("default"))) const char *madmedia_prev
     if (!same) return "no-upscale-codec";
     NSDictionary *afterSame=inspectJpeg(same,96,48,YES,&shape);
     if (!afterSame) return shape?"no-upscale-pixels":"no-upscale-decode-or-shape";
-    // Check the seeded Artist field in all outputs, not generated metadata.
+    for (NSData *output in @[high,low,same]) {
+        const auto artistBytes=fixture_artist::jpeg(static_cast<const uint8_t *>(output.bytes),output.length);
+        if (artistBytes==fixture_artist::Status::invalid) return "output-artist-invalid";
+        if (artistBytes!=fixture_artist::Status::absent) return "output-artist-bytes";
+    }
+    // Also reject any Artist the decoder independently exposes.
     if (after[tiff][artist] || afterLow[tiff][artist] || afterSame[tiff][artist])
         return "output-artist";
     return nullptr;
