@@ -1,0 +1,21 @@
+name: Installed Linux C to C++ ownership handoff
+on:
+  push:
+    branches: [checkpoint/madmedia-installed-ownership]
+permissions:
+  contents: read
+jobs:
+  installed-ownership:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify independent relocated consumers (stock tools only)
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          PYTHONDONTWRITEBYTECODE: 1
+        run: |
+          python3 scripts/test_installed_ownership.py
+          python3 scripts/verify_installed_ownership.py --sha "$EXPECTED_SHA"

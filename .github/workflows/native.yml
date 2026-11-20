@@ -4,6 +4,8 @@ permissions:
   contents: read
 jobs:
   linux:
+    # This exact push has its own stock-only, no-task installed ownership gate.
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/checkpoint/madmedia-installed-ownership' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
