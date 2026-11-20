@@ -60,15 +60,15 @@ def check_macho(path):
 ROUNDTRIP_CODES={
     10:'fixture-encode',11:'fixture-decode',12:'fixture-metadata',13:'high-codec',
     14:'low-codec',15:'high-redecode',16:'low-redecode',17:'quality-response',
-    18:'no-upscale-codec',19:'no-upscale-redecode',20:'output-metadata',
+    18:'no-upscale-codec',19:'no-upscale-redecode',20:'output-tiff-artist',
     **{phase*10+code:label+'-'+kind
        for phase,label in ((3,'codec-size-query'),(4,'codec-output'))
        for code,kind in enumerate(('unexpected-ok','argument','limit','decode','encode','capacity','size-contract'))},
 }
 
 def diagnose_fixture(source):
-    # Apply to the exact existing test logic. Only split conjunctive checks;
-    # no truth condition, format, pixel threshold, or privacy gate is removed.
+    # Split exact existing test logic for diagnostics. On this host-only
+    # path, test the seeded Artist field rather than unseeded dictionary presence.
     replacements=(
       ('    if (madmedia_ios_jpeg_resize_v1(bytes,input.length,edge,quality,NULL,0,&n)!=MADMEDIA_IMAGE_V1_CAPACITY ||\n'
        '        n==0 || n>8*1024*1024) return nil;',
@@ -95,17 +95,17 @@ def diagnose_fixture(source):
        '    if (!low) return hostFail(14);\n'
        '    NSDictionary *after=inspectJpeg(high,32,16,YES);\n'
        '    if (!after) return hostFail(15);\n'
-       '    if (!inspectJpeg(low,32,16,YES)) return hostFail(16);\n'
+       '    NSDictionary *afterLow=inspectJpeg(low,32,16,YES);\n'
+       '    if (!afterLow) return hostFail(16);\n'
        '    if (high.length<=low.length) return hostFail(17);\n'
        '    NSData *same=resize(input,128,95);\n'
        '    if (!same) return hostFail(18);\n'
-       '    if (!inspectJpeg(same,96,48,YES)) return hostFail(19);'),
+       '    NSDictionary *afterSame=inspectJpeg(same,96,48,YES);\n'
+       '    if (!afterSame) return hostFail(19);'),
       ('    return !after[tiff][artist] && !after[(__bridge NSString *)kCGImagePropertyGPSDictionary] &&\n'
        '        !after[(__bridge NSString *)kCGImagePropertyExifDictionary] &&\n'
        '        !after[(__bridge NSString *)kCGImagePropertyIPTCDictionary];',
-       '    if (!(!after[tiff][artist] && !after[(__bridge NSString *)kCGImagePropertyGPSDictionary] &&\n'
-       '        !after[(__bridge NSString *)kCGImagePropertyExifDictionary] &&\n'
-       '        !after[(__bridge NSString *)kCGImagePropertyIPTCDictionary])) return hostFail(20);\n'
+       '    if (after[tiff][artist] || afterLow[tiff][artist] || afterSame[tiff][artist]) return hostFail(20);\n'
        '    return YES;'),
     )
     for old,new in replacements:

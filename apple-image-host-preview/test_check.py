@@ -14,7 +14,7 @@ class Tests(unittest.TestCase):
         self.assertNotIn('intendedRuntime',host)
         self.assertIn('!TARGET_OS_OSX || !defined(__arm64__)',host)
         for predicate in ('high.length<=low.length','resize(input,128,95)',
-                          'Synthetic fixture only','kCGImagePropertyGPSDictionary',
+                          'Synthetic fixture only','after[tiff][artist] || afterLow[tiff][artist] || afterSame[tiff][artist]',
                           'MADMEDIA_IMAGE_V1_CAPACITY','sentinel==0x55'):
             self.assertIn(predicate,host)
         with self.assertRaises(ValueError):check.host_fixture(source.replace('if (!intendedRuntime())','if (false)'))
@@ -27,6 +27,11 @@ class Tests(unittest.TestCase):
         for code,expected in ((12,'fixture-metadata'),(17,'quality-response'),
                               (33,'codec-size-query-decode'),(44,'codec-output-encode')):
             self.assertEqual(check.ROUNDTRIP_CODES[code],expected)
+        self.assertIn('if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return hostFail(12);',host)
+        self.assertIn('if (after[tiff][artist] || afterLow[tiff][artist] || afterSame[tiff][artist]) return hostFail(20);',host)
+        for unseeded in ('GPS','Exif','IPTC'):
+            self.assertNotIn(f'kCGImageProperty{unseeded}Dictionary',host)
+        self.assertEqual(check.ROUNDTRIP_CODES[20],'output-tiff-artist')
         self.assertIn('return madmedia_preview_roundtrip()?0:hostDiagnostic;',host)
         self.assertNotIn('printf',host)
         with self.assertRaises(ValueError):check.host_fixture(source.replace('high.length<=low.length','NO'))

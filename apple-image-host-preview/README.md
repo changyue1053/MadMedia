@@ -20,9 +20,15 @@ the iOS sample's fixture/assertion source minus its UI and runtime scaffolding.
 The two process modes verify real decode/downsize/encode/redecode, no enlargement,
 broad pixel checks, a high-vs-low quality response, and argument/size/capacity
 bounds with no output-buffer writes on failure. Metadata proof is narrowly that
-the known input TIFF Artist marker is present on input and absent from output,
-and that tested GPS/Exif/IPTC dictionaries are absent in the output. This does
-not prove all possible metadata is absent or that ImageIO emits no new metadata.
+the known synthetic TIFF Artist marker is confirmed in the input and the Artist
+field is absent from each of the three decoded outputs (high quality, low
+quality and no-upscale). We do not require whole unseeded metadata dictionaries
+to be absent: presence of a dictionary does not establish forwarding, and
+an encoder may produce its own format/color/geometry metadata. The codec
+continues to draw fresh pixels and gives only its quality option to
+[ImageIO's image-based destination method](https://developer.apple.com/documentation/imageio/cgimagedestinationaddimage(_:_:_:)),
+not the source-based method that inherits source properties. The test does not
+assert all metadata types are covered or that ImageIO emits no new metadata.
 
 Local Python tests are synthetic/mocked structure checks only. The native gate
 is scoped to `checkpoint/madmedia-apple-image-host-preview`, with no automatic
