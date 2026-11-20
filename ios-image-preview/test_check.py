@@ -1,6 +1,9 @@
 """Portable source, package layout and result state tests, not Apple execution."""
 from pathlib import Path
 import tempfile
+import io
+import contextlib
+import subprocess
 import unittest
 from unittest.mock import patch
 import check
@@ -36,6 +39,7 @@ class Tests(unittest.TestCase):
             pbx=(root/'Preview.xcodeproj/project.pbxproj').read_text()
             self.assertEqual(pbx.count('Installed/lib/libmadmedia_ios_image_preview.a'),1)
             self.assertIn('Installed/include',pbx)
+            self.assertIn('"CoreFoundation"',pbx)
             for disallowed in ('image.c','producer','sqlite','curl','Security'):
                 self.assertNotIn(disallowed,pbx)
 
@@ -54,6 +58,26 @@ class Tests(unittest.TestCase):
         self.assertIn("stage='sim-ready'",runner)
         self.assertIn("'simctl','boot',uuid,timeout=60",runner)
         self.assertIn("'simctl','bootstatus',uuid,'-b',timeout=240",runner)
+
+    def test_xcode_categories_do_not_echo_transcript(self):
+        fixtures=(('error: /not-public: file not found','missing-input'),
+                  ('building for ios simulator but linking in object','platform'),
+                  ('ld: framework not-public not found','link'),
+                  ('/not-public:12:3: error: error description','compile'),
+                  ('routine CompileC and Ld lines /not-public','unclassified'))
+        for line,expected in fixtures:
+            self.assertEqual(check.xcode_category(io.BytesIO(line.encode())),expected)
+        self.assertEqual(check.xcode_category(io.BytesIO(b'x'*400000+
+                         b'\nundefined symbols for architecture arm64\n')),'link')
+        def fail(*args,**kwargs):
+            kwargs['stdout'].write(b'/not-public:12:3: error: unreleased description')
+            raise subprocess.CalledProcessError(65,['not-public'])
+        captured=io.StringIO()
+        with patch.object(check,'stage','sim-build'),patch.object(check.subprocess,'run',side_effect=fail),contextlib.redirect_stdout(captured):
+            with self.assertRaises(subprocess.CalledProcessError):
+                check.run('xcodebuild','build-for-testing')
+        self.assertEqual(captured.getvalue(),'CATEGORY: sim-build:compile\n')
+
 
     def test_branch_scope(self):
         workflow=(check.ROOT/'.github/workflows/ios-image-preview.yml').read_text()

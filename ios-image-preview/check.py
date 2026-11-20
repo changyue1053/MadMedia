@@ -15,11 +15,48 @@ stage='runner-architecture'
 RUNTIME='com.apple.CoreSimulator.SimRuntime.iOS-26-2'
 DEVICE='com.apple.CoreSimulator.SimDeviceType.iPhone-17'
 
+XCODE_STAGES={'sim-build','sim-test'}
+DIAGNOSTICS=(
+    ('missing-input',r'(?:error|fatal error):[^\n]*(?:file not found|no such file or directory|build input files? cannot be found)'),
+    ('platform',r'(?:error|fatal error):[^\n]*(?:unable to find a destination|sdk [^\n]+ cannot be located|requires an arm64 simulator)|building for [^\n]+ but (?:linking in|built for)'),
+    ('signing',r'(?:error|fatal error):[^\n]*(?:provisioning profile|signing certificate|code signing|codesign)|command codesign failed'),
+    ('link',r'undefined symbols? for architecture|duplicate symbol|ld: (?:framework|library) [^\n]+ not found|linker command failed|command ld failed'),
+    ('compile',r'command (?:compilec|swiftcompile) failed|:\d+:\d+: (?:fatal )?error:'),
+    ('project',r'(?:error|fatal error):[^\n]*(?:project is damaged|unable to read project|invalid project|pif transfer)'),
+    ('test-runner',r'(?:error|fatal error):[^\n]*(?:failed to launch|test runner|failed to prepare device)'),
+)
+
+def xcode_category(log):
+    # Scan bounded head/tail only. Never expose the selected text.
+    chunk=128*1024
+    size=log.seek(0,2);log.seek(0)
+    head=log.read(chunk);log.seek(max(len(head),size-chunk))
+    text=(head+b'\n'+log.read(chunk)).decode(errors='replace').lower()
+    for category,pattern in DIAGNOSTICS:
+        if re.search(pattern,text):return category
+    return 'unclassified'
+
 def run(*args,cwd=None,capture=False,timeout=120):
+    if stage in XCODE_STAGES and args[0]=='xcodebuild':
+        with tempfile.TemporaryFile() as log:
+            try:
+                subprocess.run(args,cwd=cwd,stdin=subprocess.DEVNULL,stdout=log,
+                               stderr=subprocess.STDOUT,timeout=timeout,check=True)
+            except subprocess.CalledProcessError:
+                print('CATEGORY: '+stage+':'+xcode_category(log),flush=True)
+                raise
+            except subprocess.TimeoutExpired:
+                print('CATEGORY: '+stage+':timeout',flush=True)
+                raise
+            except OSError:
+                print('CATEGORY: '+stage+':launch',flush=True)
+                raise
+        return None
     p=subprocess.run(args,cwd=cwd,stdin=subprocess.DEVNULL,
                      stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL,timeout=timeout,check=True)
     return p.stdout if capture else None
+
 
 def verify(summary,tree):
     for k,v in dict(totalTestCount=2,passedTests=2,failedTests=0,skippedTests=0).items():
@@ -97,7 +134,7 @@ def main():
                     'ONLY_ACTIVE_ARCH=YES','-parallel-testing-enabled','NO','-destination','platform=iOS Simulator,id='+uuid,
                     '-derivedDataPath',derived,'CODE_SIGNING_ALLOWED=YES','CODE_SIGN_IDENTITY=-','CODE_SIGNING_REQUIRED=NO']
             stage='sim-build'
-            run('xcodebuild','build-for-testing',*common,cwd=app,timeout=420)
+            run('xcodebuild','build-for-testing',*common,'-sdk','iphonesimulator',cwd=app,timeout=420)
             binary=derived/'Build/Products/Debug-iphonesimulator/PreviewApp.app/PreviewApp'
             stage='app-linkage'
             if run('xcrun','lipo','-archs',binary,capture=True).strip()!=b'arm64': raise ValueError()
