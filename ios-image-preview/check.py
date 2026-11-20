@@ -39,6 +39,26 @@ def xcode_category(log):
         if re.search(pattern,text):return category
     return 'unclassified'
 
+LINK_FAILURES=(
+    ('platform-mismatch',r'building for [^\r\n]+ but (?:linking in|built for)|ld: [^\r\n]*(?:wrong architecture|incompatible architecture|invalid platform)'),
+    ('debug-dylib',r'ld: [^\r\n]*(?:debug\.dylib|debug dylib)'),
+    ('bundle-loader',r'ld: [^\r\n]*(?:bundle loader|bundle_loader|\bbundle_loader\b)'),
+    ('framework-missing',r'ld: (?:framework not found|framework [^\r\n]+ not found)'),
+    ('library-missing',r'ld: (?:library not found|library [^\r\n]+ not found)'),
+    ('input-missing',r'ld: [^\r\n]*(?:file not found|no such file|cannot open|could not open)'),
+    ('output-path',r'ld: [^\r\n]*(?:could not write|cannot write|unable to write|failed to create output|cannot create output)'),
+    ('archive-format',r'ld: [^\r\n]*(?:archive member|malformed archive|not a mach-o|invalid archive)'),
+    ('invalid-argument',r'(?:ld|clang(?:\+\+)?): [^\r\n]*(?:unknown option|unknown argument|invalid argument|unsupported option)'),
+    ('duplicate-symbol',r'duplicate symbols?'),
+    ('undefined-symbol',r'undefined symbols?(?: for architecture [a-z0-9_]+)?:|ld: symbols? not found'),
+)
+
+def xcode_link_reason(log):
+    text=xcode_text(log).lower()
+    for reason, pattern in LINK_FAILURES:
+        if re.search(pattern,text):return reason
+    return 'unknown'
+
 def xcode_link_context(log):
     text=xcode_text(log)
     failure=text.rsplit('The following build commands failed:',1)
@@ -53,7 +73,7 @@ def xcode_link_context(log):
     # Only process quoted symbol entries inside an actual undefined-symbol block.
     undefined=False
     for line in text.splitlines():
-        if re.fullmatch(r'\s*Undefined symbols for architecture [A-Za-z0-9_]+:\s*',line):
+        if re.fullmatch(r'\s*(?:ld: )?Undefined symbols(?: for architecture [A-Za-z0-9_]+)?:\s*',line):
             undefined=True
             continue
         if not undefined:continue
@@ -86,9 +106,12 @@ def run(*args,cwd=None,capture=False,timeout=120):
             except subprocess.CalledProcessError:
                 category=xcode_category(log)
                 print('CATEGORY: '+stage+':'+category,flush=True)
-                if category=='link':
+                if category in ('link','platform','missing-input'):
                     target,family=xcode_link_context(log)
-                    print('CATEGORY: '+stage+':link-target-'+target+':link-symbol-'+family,flush=True)
+                    reason=xcode_link_reason(log)
+                    if category=='link' or target!='unknown':
+                        print('CATEGORY: '+stage+':link-target-'+target+':link-symbol-'+family,flush=True)
+                        print('CATEGORY: '+stage+':link-reason-'+reason,flush=True)
                 raise
             except subprocess.TimeoutExpired:
                 print('CATEGORY: '+stage+':timeout',flush=True)

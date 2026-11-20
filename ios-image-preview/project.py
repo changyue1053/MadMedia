@@ -41,7 +41,7 @@ def project(directory):
                         dict(defaults, PRODUCT_NAME=name, PRODUCT_BUNDLE_IDENTIFIER='org.madmedia.preview.'+name,
                              **settings)))
     app = target('PreviewApp','application',[('App.mm','sourcecode.cpp.objcpp')],
-                 dict(OTHER_LDFLAGS=['-framework','Foundation','-framework','UIKit','-framework','CoreFoundation','-framework','ImageIO','-framework','CoreGraphics'],
+                 dict(CLANG_CXX_LIBRARY='libc++', OTHER_LDFLAGS=['-lc++','-framework','Foundation','-framework','UIKit','-framework','CoreFoundation','-framework','ImageIO','-framework','CoreGraphics'],
                       HEADER_SEARCH_PATHS=['$(PROJECT_DIR)/Installed/include'], ENABLE_DEBUG_DYLIB='NO', DEAD_CODE_STRIPPING='NO', INFOPLIST_KEY_UILaunchScreen_Generation='YES'))
     tests = target('PreviewTests','bundle.unit-test',[('Tests.mm','sourcecode.cpp.objcpp')],
                    dict(TEST_HOST='$(BUILT_PRODUCTS_DIR)/PreviewApp.app/PreviewApp', BUNDLE_LOADER='$(TEST_HOST)',

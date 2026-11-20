@@ -41,6 +41,8 @@ class Tests(unittest.TestCase):
             self.assertEqual(pbx.count('Installed/lib/libmadmedia_ios_image_preview.a'),1)
             self.assertIn('Installed/include',pbx)
             self.assertIn('"CoreFoundation"',pbx)
+            self.assertEqual(pbx.count('"-lc++"'),1)
+            self.assertIn('"CLANG_CXX_LIBRARY" = "libc++";',pbx)
             for disallowed in ('image.c','producer','sqlite','curl','Security'):
                 self.assertNotIn(disallowed,pbx)
 
@@ -120,7 +122,26 @@ class Tests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 check.run('xcodebuild','build-for-testing')
         self.assertEqual(captured.getvalue(),
-            'CATEGORY: sim-build:link\nCATEGORY: sim-build:link-target-tests:link-symbol-app-bridge\n')
+            'CATEGORY: sim-build:link\nCATEGORY: sim-build:link-target-tests:link-symbol-app-bridge\n'
+            'CATEGORY: sim-build:link-reason-undefined-symbol\n')
+
+    def test_fixed_link_reasons(self):
+        for line,expected in (
+            ('ld: framework not found /private/name', 'framework-missing'),
+            ('ld: library not found for /private/name', 'library-missing'),
+            ('ld: file not found: /private/archive', 'input-missing'),
+            ('ld: could not write output /private/path', 'output-path'),
+            ('ld: unknown option /private/flag', 'invalid-argument'),
+            ('ld: invalid archive /private/archive', 'archive-format'),
+            ('ld: /private/test.debug.dylib file not found', 'debug-dylib'),
+            ('ld: cannot open bundle loader /private/app', 'bundle-loader'),
+            ('ld: building for iOS Simulator, but linking in /private/archive', 'platform-mismatch'),
+            ('Undefined symbols:', 'undefined-symbol'),
+            ('clang: error: linker command failed with exit code 1', 'unknown'),
+        ):
+            self.assertEqual(check.xcode_link_reason(io.BytesIO(line.encode())),expected)
+        log=b'Undefined symbols:\n  "std::__1::bad_alloc", referenced from:\n'
+        self.assertEqual(check.xcode_link_context(io.BytesIO(log)),('unknown','cxx-runtime'))
 
     def test_branch_scope(self):
         workflow=(check.ROOT/'.github/workflows/ios-image-preview.yml').read_text()
