@@ -95,6 +95,33 @@ class Tests(unittest.TestCase):
         self.assertEqual(captured.getvalue(),'CATEGORY: sim-build:compile\n')
 
 
+    def test_link_context_reports_only_fixed_target_and_symbol_family(self):
+        def log(symbol, target):
+            return (f'Undefined symbols for architecture arm64:\n  "{symbol}", referenced from:\n'
+                    '    /private/symbol-reference\nld: symbol(s) not found for architecture arm64\n'
+                    'The following build commands failed:\n'
+                    f"  Ld /private/Derived ARM64 (in target '{target}' from project 'Preview')\n").encode()
+        for symbol,target,want in (
+            ('_madmedia_preview_roundtrip','PreviewTests',('tests','app-bridge')),
+            ('_madmedia_ios_jpeg_resize_v1','PreviewApp',('app','installed-codec')),
+            ('std::__1::bad_alloc','PreviewApp',('app','cxx-runtime')),
+            ('_CGImageSourceCreateWithData','PreviewApp',('app','apple-image')),
+            ('_OBJC_CLASS_$_XCTestCase','PreviewTests',('tests','xctest')),
+            ('_private_symbol','Foreign',('unknown','other'))):
+            self.assertEqual(check.xcode_link_context(io.BytesIO(log(symbol,target))),want)
+        self.assertEqual(check.xcode_link_context(io.BytesIO(
+            b"Ld earlier (in target 'PreviewApp' from project 'Preview')\n")),
+            ('unknown','unknown'))
+        captured=io.StringIO()
+        def fail(*args,**kwargs):
+            kwargs['stdout'].write(log('_madmedia_preview_contract','PreviewTests'))
+            raise subprocess.CalledProcessError(65,['not-public'])
+        with patch.object(check,'stage','sim-build'),patch.object(check.subprocess,'run',side_effect=fail),contextlib.redirect_stdout(captured):
+            with self.assertRaises(subprocess.CalledProcessError):
+                check.run('xcodebuild','build-for-testing')
+        self.assertEqual(captured.getvalue(),
+            'CATEGORY: sim-build:link\nCATEGORY: sim-build:link-target-tests:link-symbol-app-bridge\n')
+
     def test_branch_scope(self):
         workflow=(check.ROOT/'.github/workflows/ios-image-preview.yml').read_text()
         self.assertIn('branches: [checkpoint/madmedia-ios-image-preview]',workflow)

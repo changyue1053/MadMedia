@@ -26,15 +26,56 @@ DIAGNOSTICS=(
     ('test-runner',r'(?:error|fatal error):[^\n]*(?:failed to launch|test runner|failed to prepare device)'),
 )
 
-def xcode_category(log):
+def xcode_text(log):
     # Scan bounded head/tail only. Never expose the selected text.
     chunk=128*1024
     size=log.seek(0,2);log.seek(0)
     head=log.read(chunk);log.seek(max(len(head),size-chunk))
-    text=(head+b'\n'+log.read(chunk)).decode(errors='replace').lower()
+    return (head+b'\n'+log.read(chunk)).decode(errors='replace')
+
+def xcode_category(log):
+    text=xcode_text(log).lower()
     for category,pattern in DIAGNOSTICS:
         if re.search(pattern,text):return category
     return 'unclassified'
+
+def xcode_link_context(log):
+    text=xcode_text(log)
+    failure=text.rsplit('The following build commands failed:',1)
+    targets=set()
+    if len(failure)==2:
+        for line in failure[1].splitlines():
+            match=re.fullmatch(r"\s*Ld .{1,4096} \(in target '(PreviewApp|PreviewTests)' from project 'Preview'\)\s*",line)
+            if match:targets.add(match[1])
+    target={frozenset(('PreviewApp',)):'app',frozenset(('PreviewTests',)):'tests',
+            frozenset(('PreviewApp','PreviewTests')):'both'}.get(frozenset(targets),'unknown')
+    families=set()
+    # Only process quoted symbol entries inside an actual undefined-symbol block.
+    undefined=False
+    for line in text.splitlines():
+        if re.fullmatch(r'\s*Undefined symbols for architecture [A-Za-z0-9_]+:\s*',line):
+            undefined=True
+            continue
+        if not undefined:continue
+        if line.lstrip().startswith(('ld:', 'clang:', 'clang++:', '**', 'The following')):
+            undefined=False
+            continue
+        match=re.fullmatch(r'\s*"([^"\r\n]{1,512})", referenced from:\s*',line)
+        if not match:continue
+        symbol=match[1]
+        if symbol in ('_madmedia_preview_roundtrip','_madmedia_preview_contract'):
+            families.add('app-bridge')
+        elif symbol=='_madmedia_ios_jpeg_resize_v1':
+            families.add('installed-codec')
+        elif symbol.startswith(('__Z','___cxa','std::','operator new','operator delete')):
+            families.add('cxx-runtime')
+        elif symbol.startswith(('_CF','_CG','_kCF','_kCG')):
+            families.add('apple-image')
+        elif symbol.startswith(('_XCT','_OBJC_CLASS_$_XCTest','__XCT')):
+            families.add('xctest')
+        else:families.add('other')
+    family=next(iter(families)) if len(families)==1 else 'multiple' if families else 'unknown'
+    return target,family
 
 def run(*args,cwd=None,capture=False,timeout=120):
     if stage in XCODE_STAGES and args[0]=='xcodebuild':
@@ -43,7 +84,11 @@ def run(*args,cwd=None,capture=False,timeout=120):
                 subprocess.run(args,cwd=cwd,stdin=subprocess.DEVNULL,stdout=log,
                                stderr=subprocess.STDOUT,timeout=timeout,check=True)
             except subprocess.CalledProcessError:
-                print('CATEGORY: '+stage+':'+xcode_category(log),flush=True)
+                category=xcode_category(log)
+                print('CATEGORY: '+stage+':'+category,flush=True)
+                if category=='link':
+                    target,family=xcode_link_context(log)
+                    print('CATEGORY: '+stage+':link-target-'+target+':link-symbol-'+family,flush=True)
                 raise
             except subprocess.TimeoutExpired:
                 print('CATEGORY: '+stage+':timeout',flush=True)
