@@ -57,6 +57,64 @@ def check_macho(path):
         run('xcrun','vtool','-show-build',path,capture=True),re.M)
     if platform_lines not in ([b'MACOS'],[b'1']):raise ValueError()
 
+ROUNDTRIP_CODES={
+    10:'fixture-encode',11:'fixture-decode',12:'fixture-metadata',13:'high-codec',
+    14:'low-codec',15:'high-redecode',16:'low-redecode',17:'quality-response',
+    18:'no-upscale-codec',19:'no-upscale-redecode',20:'output-metadata',
+    **{phase*10+code:label+'-'+kind
+       for phase,label in ((3,'codec-size-query'),(4,'codec-output'))
+       for code,kind in enumerate(('unexpected-ok','argument','limit','decode','encode','capacity','size-contract'))},
+}
+
+def diagnose_fixture(source):
+    # Apply to the exact existing test logic. Only split conjunctive checks;
+    # no truth condition, format, pixel threshold, or privacy gate is removed.
+    replacements=(
+      ('    if (madmedia_ios_jpeg_resize_v1(bytes,input.length,edge,quality,NULL,0,&n)!=MADMEDIA_IMAGE_V1_CAPACITY ||\n'
+       '        n==0 || n>8*1024*1024) return nil;',
+       '    int32_t query=madmedia_ios_jpeg_resize_v1(bytes,input.length,edge,quality,NULL,0,&n);\n'
+       '    if (query!=MADMEDIA_IMAGE_V1_CAPACITY) { hostCodecFail(30,query); return nil; }\n'
+       '    if (n==0 || n>8*1024*1024) { hostCodecFail(30,6); return nil; }'),
+      ('    if (madmedia_ios_jpeg_resize_v1(bytes,input.length,edge,quality,static_cast<uint8_t *>(out.mutableBytes),n,&written)!=MADMEDIA_IMAGE_V1_OK ||\n'
+       '        written!=n) return nil;',
+       '    int32_t output=madmedia_ios_jpeg_resize_v1(bytes,input.length,edge,quality,static_cast<uint8_t *>(out.mutableBytes),n,&written);\n'
+       '    if (output!=MADMEDIA_IMAGE_V1_OK) { hostCodecFail(40,output); return nil; }\n'
+       '    if (written!=n) { hostCodecFail(40,6); return nil; }'),
+      ('    NSData *input=fixture();\n    NSDictionary *before=',
+       '    NSData *input=fixture();\n    if (!input) return hostFail(10);\n    NSDictionary *before='),
+      ('    if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return NO;',
+       '    if (!before) return hostFail(11);\n'
+       '    if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return hostFail(12);'),
+      ('    NSData *high=resize(input,32,95), *low=resize(input,32,20);\n'
+       '    NSDictionary *after=inspectJpeg(high,32,16,YES);\n'
+       '    if (!after || !inspectJpeg(low,32,16,YES) || high.length<=low.length ||\n'
+       '        !inspectJpeg(resize(input,128,95),96,48,YES)) return NO;',
+       '    NSData *high=resize(input,32,95);\n'
+       '    if (!high) return hostFail(13);\n'
+       '    NSData *low=resize(input,32,20);\n'
+       '    if (!low) return hostFail(14);\n'
+       '    NSDictionary *after=inspectJpeg(high,32,16,YES);\n'
+       '    if (!after) return hostFail(15);\n'
+       '    if (!inspectJpeg(low,32,16,YES)) return hostFail(16);\n'
+       '    if (high.length<=low.length) return hostFail(17);\n'
+       '    NSData *same=resize(input,128,95);\n'
+       '    if (!same) return hostFail(18);\n'
+       '    if (!inspectJpeg(same,96,48,YES)) return hostFail(19);'),
+      ('    return !after[tiff][artist] && !after[(__bridge NSString *)kCGImagePropertyGPSDictionary] &&\n'
+       '        !after[(__bridge NSString *)kCGImagePropertyExifDictionary] &&\n'
+       '        !after[(__bridge NSString *)kCGImagePropertyIPTCDictionary];',
+       '    if (!(!after[tiff][artist] && !after[(__bridge NSString *)kCGImagePropertyGPSDictionary] &&\n'
+       '        !after[(__bridge NSString *)kCGImagePropertyExifDictionary] &&\n'
+       '        !after[(__bridge NSString *)kCGImagePropertyIPTCDictionary])) return hostFail(20);\n'
+       '    return YES;'),
+    )
+    for old,new in replacements:
+        if source.count(old)!=1:raise ValueError()
+        source=source.replace(old,new,1)
+    return ('static int hostDiagnostic=1;\n'
+            'static void hostCodecFail(int base, int32_t code) { if (code>=0 && code<=6) hostDiagnostic=base+code; }\n'
+            'static BOOL hostFail(int code) { if (hostDiagnostic==1) hostDiagnostic=code; return NO; }\n'+source)
+
 def host_fixture(app):
     # Reuse the iOS fixture and assertions without UIKit, app entrypoint or
     # Simulator guard. Transform only the explicit known platform scaffolding.
@@ -68,7 +126,7 @@ def host_fixture(app):
     guard='    if (!intendedRuntime()) return NO;\n'
     if app.count(marker)!=1 or app.count(runtime)!=1 or app.count(guard)!=2:raise ValueError()
     shared=marker+app.split(marker,1)[1]
-    shared=shared.replace(runtime,'',1).replace(guard,'')
+    shared=diagnose_fixture(shared.replace(runtime,'',1).replace(guard,''))
     return ('#import <Foundation/Foundation.h>\n#import <ImageIO/ImageIO.h>\n'
             '#import <CoreGraphics/CoreGraphics.h>\n#include <TargetConditionals.h>\n'
             '#if !TARGET_OS_OSX || !defined(__arm64__)\n#error Requires native ARM64 macOS\n#endif\n'
@@ -76,7 +134,7 @@ def host_fixture(app):
             +shared+'\nint main(int argc, const char **argv) {\n'
             '    @autoreleasepool {\n'
             '        if (argc != 2) return 2;\n'
-            '        if (std::strcmp(argv[1],"roundtrip")==0) return madmedia_preview_roundtrip()?0:1;\n'
+            '        if (std::strcmp(argv[1],"roundtrip")==0) return madmedia_preview_roundtrip()?0:hostDiagnostic;\n'
             '        if (std::strcmp(argv[1],"bounds")==0) return madmedia_preview_contract()?0:1;\n'
             '        return 2;\n    }\n}\n')
 
@@ -105,7 +163,15 @@ def main():
         deps=run('xcrun','otool','-L',binary,capture=True)
         if any(x not in deps for x in (b'/ImageIO.framework/',b'/CoreGraphics.framework/')) or re.search(rb'curl|sqlite|UIKit|madmedia_core',deps,re.I):raise ValueError()
         for stage in ('roundtrip','bounds'):
-            run('/usr/bin/arch','-arm64',binary,stage,timeout=45)
+            try:
+                run('/usr/bin/arch','-arm64',binary,stage,timeout=45)
+            except subprocess.CalledProcessError as error:
+                if stage=='roundtrip':
+                    print('CATEGORY: host-roundtrip:'+ROUNDTRIP_CODES.get(error.returncode,'unclassified'),flush=True)
+                raise
+            except subprocess.TimeoutExpired:
+                if stage=='roundtrip':print('CATEGORY: host-roundtrip:timeout',flush=True)
+                raise
             print('PASS: macOS host image '+stage,flush=True)
 
 if __name__=='__main__':

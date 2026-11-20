@@ -19,6 +19,18 @@ class Tests(unittest.TestCase):
             self.assertIn(predicate,host)
         with self.assertRaises(ValueError):check.host_fixture(source.replace('if (!intendedRuntime())','if (false)'))
 
+    def test_roundtrip_diagnostic_codes_remain_bounded_and_fail_closed(self):
+        source=(check.ROOT/'ios-image-preview/App.mm').read_text()
+        host=check.host_fixture(source)
+        for code in range(10,21):
+            self.assertEqual(host.count(f'return hostFail({code});'),1)
+        for code,expected in ((12,'fixture-metadata'),(17,'quality-response'),
+                              (33,'codec-size-query-decode'),(44,'codec-output-encode')):
+            self.assertEqual(check.ROUNDTRIP_CODES[code],expected)
+        self.assertIn('return madmedia_preview_roundtrip()?0:hostDiagnostic;',host)
+        self.assertNotIn('printf',host)
+        with self.assertRaises(ValueError):check.host_fixture(source.replace('high.length<=low.length','NO'))
+
     def test_verified_package_moves_before_consumer(self):
         def fake(*args,**kw):
             if '-o' in args:Path(args[args.index('-o')+1]).write_bytes(b'not native')
