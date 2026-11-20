@@ -1,0 +1,26 @@
+name: macOS ARM64 installed ImageIO host preview
+on:
+  push:
+    branches: [checkpoint/madmedia-apple-image-host-preview]
+permissions:
+  contents: read
+jobs:
+  macos-image-arm64:
+    if: github.ref == 'refs/heads/checkpoint/madmedia-apple-image-host-preview'
+    runs-on: macos-15
+    timeout-minutes: 12
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Confirm clean exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA" && test -z "$(git status --porcelain)"
+      - name: Portable host qualification contracts
+        run: python3 apple-image-host-preview/test_check.py
+      - name: Run installed ARM64 macOS codec
+        run: python3 apple-image-host-preview/check.py
