@@ -38,3 +38,11 @@ Local `python3 ios-image-preview/test_check.py` tests only the generated app,
 mocked package staging, exact named result checks and workflow boundary. The
 real archive, Apple API behaviour and native Simulator pass must be validated
 by the exact hosted result before making any qualification claim.
+
+The qualification queries the exact available iOS 26.2 runtime and creates a
+private Simulator UUID. Boot and readiness failures have separate labels;
+there are no retries. The app is compiled only as an ARM64 Simulator binary,
+checked again by lipo after linking, and both real test entrypoints check the
+running app reports iOS 26.2. This avoids depending on execution of an unrelated
+guest utility before tests. The exact local cause of a prior combined boot-stage
+failure was not observed.

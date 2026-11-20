@@ -39,6 +39,22 @@ class Tests(unittest.TestCase):
             for disallowed in ('image.c','producer','sqlite','curl','Security'):
                 self.assertNotIn(disallowed,pbx)
 
+    def test_exact_runtime_and_app_architecture_qualification(self):
+        exact=dict(identifier=check.RUNTIME,isAvailable=True)
+        check.verify_runtime({'runtimes':[exact]})
+        for runtimes in ([],[exact,exact],[dict(exact,isAvailable=False)],
+                         [dict(exact,identifier=check.RUNTIME+'-wrong')]):
+            with self.assertRaises(ValueError):check.verify_runtime({'runtimes':runtimes})
+        source=(check.ROOT/'ios-image-preview/App.mm').read_text()
+        self.assertIn('#if !TARGET_OS_SIMULATOR || !defined(__arm64__)',source)
+        self.assertEqual(source.count('if (!intendedRuntime()) return NO;'),2)
+        self.assertIn('version.majorVersion==26 && version.minorVersion==2',source)
+        runner=(check.ROOT/'ios-image-preview/check.py').read_text()
+        self.assertNotIn("'spawn'",runner)
+        self.assertIn("stage='sim-ready'",runner)
+        self.assertIn("'simctl','boot',uuid,timeout=60",runner)
+        self.assertIn("'simctl','bootstatus',uuid,'-b',timeout=240",runner)
+
     def test_branch_scope(self):
         workflow=(check.ROOT/'.github/workflows/ios-image-preview.yml').read_text()
         self.assertIn('branches: [checkpoint/madmedia-ios-image-preview]',workflow)

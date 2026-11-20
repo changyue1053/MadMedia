@@ -1,5 +1,9 @@
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
+#include <TargetConditionals.h>
+#if !TARGET_OS_SIMULATOR || !defined(__arm64__)
+#error Image preview qualification requires an ARM64 Simulator application
+#endif
 #include <madmedia/ios_image_preview.h>
 #include <vector>
 
@@ -89,7 +93,13 @@ static NSData *resize(NSData *input, uint32_t edge, uint32_t quality) {
     return out;
 }
 
+static BOOL intendedRuntime() {
+    NSOperatingSystemVersion version=NSProcessInfo.processInfo.operatingSystemVersion;
+    return version.majorVersion==26 && version.minorVersion==2;
+}
+
 extern "C" __attribute__((used,visibility("default"))) BOOL madmedia_preview_roundtrip() {
+    if (!intendedRuntime()) return NO;
     NSData *input=fixture();
     NSDictionary *before=inspectJpeg(input,96,48,NO);
     NSString *tiff=(__bridge NSString *)kCGImagePropertyTIFFDictionary;
@@ -105,6 +115,7 @@ extern "C" __attribute__((used,visibility("default"))) BOOL madmedia_preview_rou
 }
 
 extern "C" __attribute__((used,visibility("default"))) BOOL madmedia_preview_contract() {
+    if (!intendedRuntime()) return NO;
     NSData *input=fixture();
     if (!input) return NO;
     const uint8_t invalid[]={1,2,3,4};

@@ -1,6 +1,5 @@
 """ARM64 Simulator only. Fixed stages, no upload or raw diagnostics."""
 import json
-import os
 from pathlib import Path
 import platform
 import re
@@ -12,7 +11,9 @@ from project import project
 
 ROOT=Path(__file__).resolve().parents[1]
 CASES={'PreviewTests/testInstalledImageRoundTrip','PreviewTests/testInstalledImageBoundsAndCapacity'}
-stage='preflight'
+stage='runner-architecture'
+RUNTIME='com.apple.CoreSimulator.SimRuntime.iOS-26-2'
+DEVICE='com.apple.CoreSimulator.SimDeviceType.iPhone-17'
 
 def run(*args,cwd=None,capture=False,timeout=120):
     p=subprocess.run(args,cwd=cwd,stdin=subprocess.DEVNULL,
@@ -63,12 +64,20 @@ def install(root, work, sdk):
     if source.exists() or build.exists() or package.exists(): raise ValueError()
     return consumer
 
+def verify_runtime(document):
+    matches=[r for r in document['runtimes'] if r.get('identifier')==RUNTIME]
+    if len(matches)!=1 or matches[0].get('isAvailable') is not True: raise ValueError()
+
 def main():
     global stage
     if platform.system()!='Darwin' or platform.machine()!='arm64': raise ValueError()
-    if run('xcodebuild','-version',capture=True).strip()!=b'Xcode 26.2\nBuild version 17C52': raise ValueError()
-    if run('xcrun','--sdk','iphonesimulator','--show-sdk-version',capture=True).strip()!=b'26.2': raise ValueError()
-    sdk=run('xcrun','--sdk','iphonesimulator','--show-sdk-path',capture=True).decode().strip()
+    stage='xcode-preflight'
+    if run('xcodebuild','-version',capture=True,timeout=30).strip()!=b'Xcode 26.2\nBuild version 17C52': raise ValueError()
+    stage='sdk-preflight'
+    if run('xcrun','--sdk','iphonesimulator','--show-sdk-version',capture=True,timeout=30).strip()!=b'26.2': raise ValueError()
+    sdk=run('xcrun','--sdk','iphonesimulator','--show-sdk-path',capture=True,timeout=30).decode().strip()
+    stage='runtime-preflight'
+    verify_runtime(json.loads(run('xcrun','simctl','list','runtimes','available','-j',capture=True,timeout=30)))
     with tempfile.TemporaryDirectory(prefix='madmedia-image-') as tmp:
         work=Path(tmp).resolve()
         stage='install-relocate';app=install(ROOT,work,sdk)
@@ -76,13 +85,13 @@ def main():
         project(app)
         stage='sim-create'
         uuid=run('xcrun','simctl','create','MadMediaImagePreview',
-            'com.apple.CoreSimulator.SimDeviceType.iPhone-17','com.apple.CoreSimulator.SimRuntime.iOS-26-2',capture=True).decode().strip()
+            DEVICE,RUNTIME,capture=True,timeout=60).decode().strip()
         if not re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}',uuid): raise ValueError()
         try:
             stage='sim-boot'
-            run('xcrun','simctl','boot',uuid)
+            run('xcrun','simctl','boot',uuid,timeout=60)
+            stage='sim-ready'
             run('xcrun','simctl','bootstatus',uuid,'-b',timeout=240)
-            if run('xcrun','simctl','spawn',uuid,'uname','-m',capture=True).strip()!=b'arm64': raise ValueError()
             derived=work/'derived'
             common=['-project','Preview.xcodeproj','-scheme','Preview','-configuration','Debug','ARCHS=arm64',
                     'ONLY_ACTIVE_ARCH=YES','-parallel-testing-enabled','NO','-destination','platform=iOS Simulator,id='+uuid,
