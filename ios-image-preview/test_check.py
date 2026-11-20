@@ -143,6 +143,34 @@ class Tests(unittest.TestCase):
         log=b'Undefined symbols:\n  "std::__1::bad_alloc", referenced from:\n'
         self.assertEqual(check.xcode_link_context(io.BytesIO(log)),('unknown','cxx-runtime'))
 
+    def test_missing_library_allowlist_never_emits_names(self):
+        for line,expected in (
+            ("ld: library 'c++' not found",'cxx'),
+            ('ld: library not found for -lc++','cxx'),
+            ('ld: library "/private dir/libmadmedia_ios_image_preview.a" not found','preview-archive'),
+            ('ld: library not found for /private/libobjc.tbd','objc'),
+            ('ld: library not found for /private/libarclite_iphonesimulator.a','arclite'),
+            ('ld: library not found for /private/libc++_arbitrary.tbd','other'),
+            ('xcode printed ld: library not found for -lc++','other'),
+            ('ld: library not found for -lc++\nld: library not found for -lobjc','other')):
+            self.assertEqual(check.xcode_missing_library(io.BytesIO(line.encode())),expected)
+        def fail(*args,**kwargs):
+            kwargs['stdout'].write(b'ld: library not found for /private/unreleased-name\n')
+            raise subprocess.CalledProcessError(65,['private'])
+        output=io.StringIO()
+        with patch.object(check,'stage','sim-build'),patch.object(check.subprocess,'run',side_effect=fail),contextlib.redirect_stdout(output):
+            with self.assertRaises(subprocess.CalledProcessError):
+                check.run('xcodebuild','build-for-testing')
+        self.assertIn('CATEGORY: sim-build:link-library-other\n',output.getvalue())
+        self.assertNotIn('unreleased-name',output.getvalue())
+
+    def test_seeded_input_artist_absent_in_all_outputs(self):
+        fixture=(check.ROOT/'ios-image-preview/App.mm').read_text()
+        self.assertIn('if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return NO;',fixture)
+        self.assertIn('return !after[tiff][artist] && !afterLow[tiff][artist] && !afterSame[tiff][artist];',fixture)
+        for unseeded in ('GPS','Exif','IPTC'):
+            self.assertNotIn(f'kCGImageProperty{unseeded}Dictionary',fixture)
+
     def test_branch_scope(self):
         workflow=(check.ROOT/'.github/workflows/ios-image-preview.yml').read_text()
         self.assertIn('branches: [checkpoint/madmedia-ios-image-preview]',workflow)

@@ -28,8 +28,8 @@ producer and build directories are deleted before consumer configuration.
 The app owns the codec call from the installed archive, not a static mock or
 XCTest-side reimplementation. Exact named tests exercise (1) synthetic JPEG
 decode/downsize/encode/redecode, bounds/no enlargement, broad pixel fidelity,
-lossy quality response, and no forwarded synthetic TIFF artist and tested
-metadata fields; (2) generic invalid bytes, logical bounds, quality and
+lossy quality response, and the absence of the seeded TIFF Artist field in all
+three outputs (high, low, no-upscale); (2) generic invalid bytes, logical bounds, quality and
 capacity without output writes. No production images, uploads, files as API
 inputs, third-party additions or device signing/testing. The simulator uses
 local ad-hoc build signing only.

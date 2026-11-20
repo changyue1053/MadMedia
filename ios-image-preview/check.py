@@ -34,7 +34,9 @@ def xcode_text(log):
     return (head+b'\n'+log.read(chunk)).decode(errors='replace')
 
 def xcode_category(log):
-    text=xcode_text(log).lower()
+    raw=xcode_text(log)
+    if any(MISSING_LIBRARY_LINE.fullmatch(line) for line in raw.splitlines()):return 'link'
+    text=raw.lower()
     for category,pattern in DIAGNOSTICS:
         if re.search(pattern,text):return category
     return 'unclassified'
@@ -58,6 +60,27 @@ def xcode_link_reason(log):
     for reason, pattern in LINK_FAILURES:
         if re.search(pattern,text):return reason
     return 'unknown'
+
+MISSING_LIBRARY_LINE=re.compile(
+    r"\s*ld: library (?:not found for (?P<for_name>[^\r\n]{1,1024})|(?P<name>[^\r\n]{1,1024}) not found)\s*")
+LIBRARY_NAMES={
+    'c++':'cxx','-lc++':'cxx','libc++.tbd':'cxx','libc++.dylib':'cxx',
+    'objc':'objc','-lobjc':'objc','libobjc.tbd':'objc','libobjc.dylib':'objc',
+    'libmadmedia_ios_image_preview.a':'preview-archive',
+    'arclite':'arclite','-larclite':'arclite','libarclite.a':'arclite',
+    'libarclite_iphonesimulator.a':'arclite','libarclite_iphoneos.a':'arclite',
+}
+
+def xcode_missing_library(log):
+    labels=set()
+    for line in xcode_text(log).splitlines():
+        match=MISSING_LIBRARY_LINE.fullmatch(line)
+        if match:
+            name=(match['for_name'] or match['name']).strip()
+            if len(name)>1 and name[0]==name[-1] and name[0] in ("'",'"'):
+                name=name[1:-1]
+            labels.add(LIBRARY_NAMES.get(name.rsplit('/',1)[-1],'other'))
+    return next(iter(labels)) if len(labels)==1 else 'other'
 
 def xcode_link_context(log):
     text=xcode_text(log)
@@ -112,6 +135,8 @@ def run(*args,cwd=None,capture=False,timeout=120):
                     if category=='link' or target!='unknown':
                         print('CATEGORY: '+stage+':link-target-'+target+':link-symbol-'+family,flush=True)
                         print('CATEGORY: '+stage+':link-reason-'+reason,flush=True)
+                        if reason=='library-missing':
+                            print('CATEGORY: '+stage+':link-library-'+xcode_missing_library(log),flush=True)
                 raise
             except subprocess.TimeoutExpired:
                 print('CATEGORY: '+stage+':timeout',flush=True)

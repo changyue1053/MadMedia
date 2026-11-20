@@ -107,11 +107,13 @@ extern "C" __attribute__((used,visibility("default"))) BOOL madmedia_preview_rou
     if (![before[tiff][artist] isEqual:@"Synthetic fixture only"]) return NO;
     NSData *high=resize(input,32,95), *low=resize(input,32,20);
     NSDictionary *after=inspectJpeg(high,32,16,YES);
-    if (!after || !inspectJpeg(low,32,16,YES) || high.length<=low.length ||
-        !inspectJpeg(resize(input,128,95),96,48,YES)) return NO;
-    return !after[tiff][artist] && !after[(__bridge NSString *)kCGImagePropertyGPSDictionary] &&
-        !after[(__bridge NSString *)kCGImagePropertyExifDictionary] &&
-        !after[(__bridge NSString *)kCGImagePropertyIPTCDictionary];
+    NSDictionary *afterLow=inspectJpeg(low,32,16,YES);
+    if (!after || !afterLow || high.length<=low.length) return NO;
+    NSDictionary *afterSame=inspectJpeg(resize(input,128,95),96,48,YES);
+    if (!afterSame) return NO;
+    // ImageIO may generate metadata. Prove the observed input field was
+    // not carried into any of the three independently decoded outputs.
+    return !after[tiff][artist] && !afterLow[tiff][artist] && !afterSame[tiff][artist];
 }
 
 extern "C" __attribute__((used,visibility("default"))) BOOL madmedia_preview_contract() {
